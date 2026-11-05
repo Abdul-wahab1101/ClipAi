@@ -6,7 +6,8 @@ import tempfile
 import shutil
 import json
 from pathlib import Path
-import re
+
+# ---------------- PAGE SETTINGS ----------------
 
 st.set_page_config(
     page_title="ClipAI - AI Video Clipper",
@@ -15,10 +16,87 @@ st.set_page_config(
 )
 
 st.title("🎬 ClipAI")
-st.subheader("Turn Long Videos Into Short Videos With AI")
-st.write("Upload a video. AI will find interesting moments and create clips.")
+st.subheader("Turn Long Videos Into Short Viral Clips")
+st.write("Upload your video and let AI find its best moments.")
 
 st.divider()
+
+# ---------------- HELPER FUNCTIONS ----------------
+
+def get_value(item, key, default=None):
+    """Read a field from either a dictionary or an object."""
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def run_command(command, timeout=300):
+    """Run FFmpeg or FFprobe safely."""
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout
+    )
+
+    if result.returncode != 0:
+        error = result.stderr[-1500:] if result.stderr else "Unknown media error."
+        raise RuntimeError(error)
+
+    return result
+
+
+def get_video_duration(video_path):
+    result = run_command([
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path)
+    ], timeout=60)
+
+    return float(result.stdout.strip())
+
+
+def clean_clip_data(data, duration):
+    """Validate AI-generated clip timestamps."""
+    if not isinstance(data, dict):
+        raise ValueError("AI returned an invalid response.")
+
+    suggestions = data.get("clips", [])
+
+    if not isinstance(suggestions, list):
+        raise ValueError("AI clip suggestions are invalid.")
+
+    valid_clips = []
+
+    for item in suggestions[:3]:
+        try:
+            start = float(item["start"])
+            end = float(item["end"])
+
+            if start < 0 or end > duration or end <= start:
+                continue
+
+            length = end - start
+
+            if length < 10 or length > 65:
+                continue
+
+            valid_clips.append({
+                "start": start,
+                "end": end,
+                "title": str(item.get("title", "AI Clip"))[:70],
+                "reason": str(item.get("reason", "Interesting moment"))[:250]
+            })
+
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    return valid_clips
+
+
+# ---------------- VIDEO UPLOAD ----------------
 
 uploaded_file = st.file_uploader(
     "📁 Upload your video",
@@ -26,223 +104,344 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file:
+
+    file_size = uploaded_file.size / (1024 * 1024)
+
     st.success("Video uploaded successfully!")
+
     st.video(uploaded_file)
 
-    st.write(
-        "File size:",
-        round(uploaded_file.size / (1024 * 1024), 2),
-        "MB"
-    )
+    st.caption(f"File size: {file_size:.2f} MB")
 
-    if st.button("✨ Generate AI Clips", type="primary"):
+    if file_size > 150:
+        st.error("Please use a video smaller than 150 MB.")
 
-        if shutil.which("ffmpeg") is None:
-            st.error("FFmpeg is not installed. Check packages.txt and redeploy.")
+    else:
 
-        else:
-            try:
-                api_key = st.secrets["GROQ_API_KEY"]
-                client = Groq(api_key=api_key)
+        if st.button("✨ Generate AI Clips", type="primary"):
 
-                with tempfile.TemporaryDirectory() as temp_dir:
+            # Check FFmpeg installation
 
-                    folder = Path(temp_dir)
-                    video_path = folder / "original_video.mp4"
-                    audio_path = folder / "audio.mp3"
-
-                    video_path.write_bytes(uploaded_file.getvalue())
-
-                    with st.spinner("Preparing video audio..."):
-                        duration_result = subprocess.run(
-                            [
-                                "ffprobe", "-v", "error",
-                                "-show_entries", "format=duration",
-                                "-of", "default=noprint_wrappers=1:nokey=1",
-                                str(video_path)
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=60
-                        )
-
-                        if duration_result.returncode != 0:
-                            raise Exception("Could not read video duration.")
-
-                        video_duration = float(duration_result.stdout.strip())
-
-                        if video_duration <= 0:
-                            raise Exception("This video has no valid duration.")
-
-                        audio_result = subprocess.run(
-                            [
-                                "ffmpeg", "-y",
-                                "-i", str(video_path),
-                                "-map", "0:a:0",
-                                "-vn", "-ac", "1",
-                                "-ar", "16000",
-                                "-b:a", "48k",
-                                str(audio_path)
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=300
-                        )
-
-                        if audio_result.returncode != 0:
-                            raise Exception(
-                                "Could not extract audio. Make sure your video has sound."
-                            )
-
-                    if audio_path.stat().st_size > 24 * 1024 * 1024:
-                        raise Exception(
-                            "Audio is too large for this first version. "
-                            "Please try a shorter video."
-                        )
-
-                    with st.spinner("AI is understanding the video..."):
-                        with open(audio_path, "rb") as audio_file:
-                            transcript = client.audio.transcriptions.create(
-                                file=audio_file,
-                                model="whisper-large-v3-turbo",
-                                response_format="verbose_json",
-                                timestamp_granularities=["segment"],
-                                temperature=0.0
-                            )
-
-                    segments = transcript.segments
-
-                    if not segments:
-                        raise Exception("AI could not find any speech in this video.")
-
-                    transcript_lines = []
-
-                    for seg in segments[:500]:
-                        start = float(seg.start)
-                        end = float(seg.end)
-                        text = seg.text.strip()
-
-                        if text:
-                            transcript_lines.append(
-                                f"[{start:.2f} - {end:.2f}] {text}"
-                            )
-
-                    transcript_text = "\n".join(transcript_lines)
-
-                    if len(segments) > 500:
-                        st.warning(
-                            "This first version analyzes up to 500 speech segments."
-                        )
-
-                    st.success("Speech analysis completed!")
-
-                    with st.spinner("AI is finding the best moments..."):
-                        response = client.chat.completions.create(
-                            model="openai/gpt-oss-20b",
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You are an expert short-form video editor. "
-                                        "Find engaging, self-contained moments from "
-                                        "the supplied timestamped transcript. "
-                                        "Return only valid JSON with a clips array. "
-                                        "Each clip must have start, end, title and reason. "
-                                        "Choose at most 3 clips. Each clip should be "
-                                        "between 20 and 60 seconds. Use only times "
-                                        "supported by the transcript. Do not invent "
-                                        "timestamps. Prefer strong hooks, useful ideas, "
-                                        "surprising statements or emotional moments."
-                                    )
-                                },
-                                {
-                                    "role": "user",
-                                    "content": (
-                                        f"Video duration: {video_duration:.2f} seconds.\n"
-                                        "Find up to 3 best short clips from this transcript:\n"
-                                        + transcript_text
-                                    )
-                                }
-                            ],
-                            response_format={"type": "json_object"},
-                            temperature=0.2,
-                            max_completion_tokens=1200
-                        )
-
-                    answer = response.choices[0].message.content
-                    clip_suggestions = json.loads(answer).get("clips", [])
-
-                    if not clip_suggestions:
-                        raise Exception("AI could not find suitable clips.")
-
-                    generated_clips = []
-
-                    for item in clip_suggestions[:3]:
-                        start = max(0.0, float(item["start"]))
-                        end = min(video_duration, float(item["end"]))
-                        clip_length = end - start
-
-                        if clip_length < 10 or clip_length > 65:
-                            continue
-
-                        title = str(item.get("title", "AI Clip"))[:70]
-                        reason = str(item.get("reason", "Interesting moment"))
-
-                        output_path = folder / f"clip_{len(generated_clips) + 1}.mp4"
-
-                        cut_result = subprocess.run(
-                            [
-                                "ffmpeg", "-y",
-                                "-ss", str(start),
-                                "-i", str(video_path),
-                                "-t", str(clip_length),
-                                "-c:v", "libx264",
-                                "-preset", "ultrafast",
-                                "-crf", "23",
-                                "-c:a", "aac",
-                                "-movflags", "+faststart",
-                                str(output_path)
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=180
-                        )
-
-                        if cut_result.returncode == 0 and output_path.exists():
-                            generated_clips.append({
-                                "title": title,
-                                "reason": reason,
-                                "start": start,
-                                "end": end,
-                                "data": output_path.read_bytes()
-                            })
-
-                    if not generated_clips:
-                        raise Exception("AI selected moments but video cutting failed.")
-
-                st.balloons()
-                st.success(
-                    f"Successfully created {len(generated_clips)} AI clips!"
+            if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+                st.error(
+                    "FFmpeg is missing. Check packages.txt "
+                    "and redeploy your website."
                 )
 
-                for index, clip in enumerate(generated_clips, 1):
-                    st.divider()
-                    st.subheader(f"🎬 Clip {index}: {clip['title']}")
-                    st.write(clip["reason"])
-                    st.caption(
-                        f"Time: {clip['start']:.1f}s – {clip['end']:.1f}s"
-                    )
-                    st.video(clip["data"])
-                    st.download_button(
-                        label=f"⬇️ Download Clip {index}",
-                        data=clip["data"],
-                        file_name=f"ClipAI_{index}.mp4",
-                        mime="video/mp4",
-                        key=f"download_{index}"
+            else:
+
+                try:
+                    # Read API key securely
+
+                    api_key = st.secrets["GROQ_API_KEY"]
+                    client = Groq(api_key=api_key)
+
+                    with tempfile.TemporaryDirectory() as temp:
+
+                        folder = Path(temp)
+
+                        suffix = Path(uploaded_file.name).suffix.lower()
+                        video_path = folder / f"input{suffix or '.mp4'}"
+                        audio_path = folder / "audio.mp3"
+
+                        video_path.write_bytes(
+                            uploaded_file.getvalue()
+                        )
+
+                        # -------- STEP 1: VIDEO ANALYSIS --------
+
+                        with st.spinner("Analyzing your video..."):
+
+                            duration = get_video_duration(video_path)
+
+                            if duration <= 0:
+                                raise ValueError("Invalid video duration.")
+
+                            if duration > 600:
+                                raise ValueError(
+                                    "First version supports videos up to "
+                                    "10 minutes. Try a shorter video."
+                                )
+
+                            # -------- STEP 2: AUDIO EXTRACTION --------
+
+                            with st.spinner("Extracting video audio..."):
+
+                                run_command([
+                                    "ffmpeg",
+                                    "-y",
+                                    "-i", str(video_path),
+                                    "-map", "0:a:0",
+                                    "-vn",
+                                    "-ac", "1",
+                                    "-ar", "16000",
+                                    "-b:a", "48k",
+                                    str(audio_path)
+                                ], timeout=300)
+
+                            if not audio_path.exists():
+                                raise RuntimeError("Audio extraction failed.")
+
+                            audio_size = audio_path.stat().st_size
+
+                            if audio_size > 24 * 1024 * 1024:
+                                raise ValueError(
+                                    "Audio exceeds the current 24 MB "
+                                    "processing limit. Try a shorter video."
+                                )
+
+                            # -------- STEP 3: GROQ TRANSCRIPTION --------
+
+                            with st.spinner(
+                                "🤖 AI is understanding your video..."
+                            ):
+
+                                with open(audio_path, "rb") as audio_file:
+
+                                    transcription = (
+                                        client.audio.transcriptions.create(
+                                            file=audio_file,
+                                            model="whisper-large-v3-turbo",
+                                            response_format="verbose_json",
+                                            timestamp_granularities=["segment"],
+                                            temperature=0.0
+                                        )
+                                    )
+
+                            transcript = get_value(
+                                transcription, "text", ""
+                            )
+
+                            segments = get_value(
+                                transcription, "segments", []
+                            )
+
+                            if not transcript or not segments:
+                                raise ValueError(
+                                    "No clear speech was detected. "
+                                    "Try a video with audible speech."
+                                )
+
+                            # -------- STEP 4: READ TIMESTAMPS --------
+
+                            transcript_lines = []
+
+                            for segment in segments[:500]:
+
+                                start = get_value(segment, "start")
+                                end = get_value(segment, "end")
+                                words = get_value(segment, "text", "")
+
+                                if start is None or end is None:
+                                    continue
+
+                                try:
+                                    start = float(start)
+                                    end = float(end)
+                                    words = str(words).strip()
+
+                                    if words and 0 <= start < end <= duration:
+                                        transcript_lines.append(
+                                            f"[{start:.2f}-{end:.2f}] {words}"
+                                        )
+
+                                except (TypeError, ValueError):
+                                    continue
+
+                            if not transcript_lines:
+                                raise ValueError(
+                                    "AI could not find valid timestamps."
+                                )
+
+                            timestamped_transcript = "\n".join(
+                                transcript_lines
+                            )
+
+                            # -------- STEP 5: SELECT BEST MOMENTS --------
+
+                            with st.spinner(
+                                "✨ Finding the most interesting moments..."
+                            ):
+
+                                response = client.chat.completions.create(
+
+                                    model="openai/gpt-oss-20b",
+
+                                    messages=[
+                                        {
+                                            "role": "system",
+                                            "content": """
+You are an expert short-video editor.
+
+Analyze the timestamped video transcript.
+
+Find up to 3 interesting, self-contained moments.
+
+Prioritize:
+- Strong opening hooks
+- Interesting facts
+- Useful information
+- Surprising moments
+- Emotional or entertaining statements
+
+Rules:
+1. Each clip should be 20 to 60 seconds.
+2. Use timestamps from the transcript.
+3. Never invent timestamps.
+4. Keep start and end within the video duration.
+5. Do not select repetitive moments.
+
+Return valid JSON only:
+
+{
+  "clips": [
+    {
+      "start": 10.0,
+      "end": 45.0,
+      "title": "Interesting Moment",
+      "reason": "Why this moment is worth watching"
+    }
+  ]
+}
+"""
+                                        },
+                                        {
+                                            "role": "user",
+                                            "content": (
+                                                f"Video duration: {duration:.2f} seconds.\n\n"
+                                                + timestamped_transcript
+                                            )
+                                        }
+                                    ],
+
+                                    response_format={
+                                        "type": "json_object"
+                                    },
+
+                                    temperature=0.2,
+                                    max_completion_tokens=2000
+                                )
+
+                            ai_text = response.choices[0].message.content
+
+                            if not ai_text:
+                                raise ValueError("AI returned an empty response.")
+
+                            ai_data = json.loads(ai_text)
+
+                            clips = clean_clip_data(
+                                ai_data,
+                                duration
+                            )
+
+                            if not clips:
+                                raise ValueError(
+                                    "AI could not find suitable clips. "
+                                    "Try another video with clearer speech."
+                                )
+
+                            # -------- STEP 6: CUT VIDEO CLIPS --------
+
+                            generated_clips = []
+
+                            for number, clip in enumerate(clips, 1):
+
+                                output_path = (
+                                    folder / f"clip_{number}.mp4"
+                                )
+
+                                clip_length = (
+                                    clip["end"] - clip["start"]
+                                )
+
+                                with st.spinner(
+                                    f"Creating clip {number} of {len(clips)}..."
+                                ):
+
+                                    run_command([
+                                        "ffmpeg",
+                                        "-y",
+                                        "-ss", str(clip["start"]),
+                                        "-i", str(video_path),
+                                        "-t", str(clip_length),
+                                        "-map", "0:v:0",
+                                        "-map", "0:a:0?",
+                                        "-c:v", "libx264",
+                                        "-preset", "ultrafast",
+                                        "-crf", "23",
+                                        "-c:a", "aac",
+                                        "-b:a", "128k",
+                                        "-movflags", "+faststart",
+                                        "-pix_fmt", "yuv420p",
+                                        str(output_path)
+                                    ], timeout=180)
+
+                                if output_path.exists() and output_path.stat().st_size > 0:
+
+                                    generated_clips.append({
+                                        "title": clip["title"],
+                                        "reason": clip["reason"],
+                                        "start": clip["start"],
+                                        "end": clip["end"],
+                                        "data": output_path.read_bytes()
+                                    })
+
+                            if not generated_clips:
+                                raise RuntimeError(
+                                    "AI selected moments, but video cutting failed."
+                                )
+
+                    # -------- STEP 7: SHOW RESULTS --------
+
+                    st.balloons()
+
+                    st.success(
+                        f"Success! {len(generated_clips)} clips created."
                     )
 
-            except Exception as error:
-                st.error(f"ClipAI error: {error}")
+                    for number, clip in enumerate(generated_clips, 1):
+
+                        st.divider()
+
+                        st.subheader(
+                            f"🎬 Clip {number}: {clip['title']}"
+                        )
+
+                        st.write(clip["reason"])
+
+                        st.caption(
+                            f"{clip['start']:.1f}s – {clip['end']:.1f}s"
+                        )
+
+                        st.video(clip["data"])
+
+                        st.download_button(
+                            label=f"⬇️ Download Clip {number}",
+                            data=clip["data"],
+                            file_name=f"ClipAI_{number}.mp4",
+                            mime="video/mp4",
+                            key=f"download_clip_{number}"
+                        )
+
+                    with st.expander("View original AI transcript"):
+                        st.text_area(
+                            "Transcript",
+                            transcript,
+                            height=250
+                        )
+
+                except KeyError as error:
+                    st.error(
+                        "GROQ_API_KEY is missing. Check Streamlit "
+                        "Settings → Secrets."
+                    )
+
+                except Exception as error:
+                    st.error(f"ClipAI processing failed: {error}")
+
+
+# ---------------- FOOTER ----------------
 
 st.divider()
-st.caption("ClipAI © 2026 | Create Shorts From Your Videos")
+
+st.caption("© 2026 ClipAI | AI-powered video clipping")
