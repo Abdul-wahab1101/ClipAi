@@ -94,6 +94,48 @@ def get_video_duration(video_path):
     return float(result.stdout.strip())
 
 
+def srt_time(seconds):
+    """Convert seconds to an SRT timestamp."""
+    milliseconds = max(0, int(round(float(seconds) * 1000)))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole_seconds, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{millis:03d}"
+
+
+def write_clip_subtitles(segments, clip_start, clip_end, subtitle_path):
+    """Create clip-relative SRT captions from Groq timestamped segments."""
+    entries = []
+    for segment in segments:
+        start = get_value(segment, "start")
+        end = get_value(segment, "end")
+        text = str(get_value(segment, "text", "")).strip()
+        if start is None or end is None or not text:
+            continue
+        try:
+            start = float(start)
+            end = float(end)
+        except (TypeError, ValueError):
+            continue
+
+        overlap_start = max(start, clip_start)
+        overlap_end = min(end, clip_end)
+        if overlap_end <= overlap_start:
+            continue
+
+        # Keep subtitle text on one line; SRT/FFmpeg handles display wrapping.
+        text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+        entries.append((overlap_start - clip_start, overlap_end - clip_start, text))
+
+    with open(subtitle_path, "w", encoding="utf-8") as subtitle_file:
+        for index, (start, end, text) in enumerate(entries, 1):
+            subtitle_file.write(
+                f"{index}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n\n"
+            )
+
+    return bool(entries)
+
+
 def validate_suggestions(data, duration):
     if not isinstance(data, dict):
         raise ValueError("AI returned an invalid response.")
@@ -132,7 +174,7 @@ def validate_suggestions(data, duration):
 # ---------------- PAGE CONTENT ----------------
 st.title("🎬 ClipAI")
 st.subheader("Turn long videos into short clips with AI")
-st.write("Upload a short video. ClipAI finds interesting moments and cuts them into MP4 clips.")
+st.write("Upload a short video. ClipAI finds interesting moments and creates vertical 9:16 MP4 clips with captions.")
 
 st.info(
     "Beta limits: up to 50 MB upload, 5-minute video, "
@@ -297,24 +339,95 @@ if uploaded_file is not None:
 
                         generated = []
                         for number, clip in enumerate(clips, 1):
-                            output_path = folder / f"clip_{number}.mp4"
+                            output_path = folder / f"clip_{number}_vertical.mp4"
+                            subtitle_path = folder / f"clip_{number}.srt"
                             clip_length = clip["end"] - clip["start"]
+                            has_subtitles = write_clip_subtitles(
+                                segments,
+                                clip["start"],
+                                clip["end"],
+                                subtitle_path,
+                            )
 
-                            with st.spinner(f"Creating clip {number} of {len(clips)}..."):
-                                run_command(
-                                    [
-                                        "ffmpeg", "-y",
-                                        "-ss", str(clip["start"]),
-                                        "-i", str(video_path),
-                                        "-t", str(clip_length),
-                                        "-map", "0:v:0", "-map", "0:a:0?",
-                                        "-c:v", "libx264", "-preset", "ultrafast",
-                                        "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-                                        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                                        str(output_path),
-                                    ],
-                                    timeout=180,
-                                )
+                            # Build a 9:16 canvas: blurred fill behind the full original frame.
+                            # This avoids cutting off people or text at the left/right edges.
+                            base_filter = (
+                                "[0:v]split=2[bg][fg];"
+                                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
+                                "crop=1080:1920,boxblur=22:10[bg2];"
+                                "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fg2];"
+                                "[bg2][fg2]overlay=(W-w)/2:(H-h)/2"
+                            )
+
+                            with st.spinner(f"Creating vertical clip {number} of {len(clips)}..."):
+                                filter_with_subtitles = None
+                                if has_subtitles:
+                                    style = (
+                                        "FontName=DejaVu Sans,FontSize=42,"
+                                        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+                                        "BorderStyle=1,Outline=3,Shadow=1,"
+                                        "Alignment=2,MarginV=145"
+                                    )
+                                    filter_with_subtitles = (
+                                        base_filter
+                                        + f",subtitles={subtitle_path.as_posix()}:force_style='{style}'"
+                                        + "[v]"
+                                    )
+
+                                common_args = [
+                                    "ffmpeg", "-y",
+                                    "-ss", str(clip["start"]),
+                                    "-i", str(video_path),
+                                    "-t", str(clip_length),
+                                ]
+
+                                if filter_with_subtitles:
+                                    try:
+                                        run_command(
+                                            common_args + [
+                                                "-filter_complex", filter_with_subtitles,
+                                                "-map", "[v]", "-map", "0:a:0?",
+                                                "-r", "30",
+                                                "-c:v", "libx264", "-preset", "ultrafast",
+                                                "-crf", "23", "-c:a", "aac", "-b:a", "128k",
+                                                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                                                str(output_path),
+                                            ],
+                                            timeout=240,
+                                        )
+                                    except RuntimeError:
+                                        # Fallback: still create a vertical MP4 if subtitle rendering
+                                        # is unavailable on the hosting FFmpeg build.
+                                        output_path.unlink(missing_ok=True)
+                                        st.warning(
+                                            "This server could not burn subtitles into the video. "
+                                            "A separate SRT subtitle file will be provided."
+                                        )
+                                        run_command(
+                                            common_args + [
+                                                "-filter_complex", base_filter + "[v]",
+                                                "-map", "[v]", "-map", "0:a:0?",
+                                                "-r", "30",
+                                                "-c:v", "libx264", "-preset", "ultrafast",
+                                                "-crf", "23", "-c:a", "aac", "-b:a", "128k",
+                                                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                                                str(output_path),
+                                            ],
+                                            timeout=240,
+                                        )
+                                else:
+                                    run_command(
+                                        common_args + [
+                                            "-filter_complex", base_filter + "[v]",
+                                            "-map", "[v]", "-map", "0:a:0?",
+                                            "-r", "30",
+                                            "-c:v", "libx264", "-preset", "ultrafast",
+                                            "-crf", "23", "-c:a", "aac", "-b:a", "128k",
+                                            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                                            str(output_path),
+                                        ],
+                                        timeout=240,
+                                    )
 
                             if output_path.exists() and output_path.stat().st_size > 0:
                                 generated.append(
@@ -324,6 +437,7 @@ if uploaded_file is not None:
                                         "start": clip["start"],
                                         "end": clip["end"],
                                         "data": output_path.read_bytes(),
+                                        "srt": subtitle_path.read_bytes() if subtitle_path.exists() and subtitle_path.stat().st_size > 0 else None,
                                     }
                                 )
 
@@ -345,6 +459,14 @@ if uploaded_file is not None:
                             mime="video/mp4",
                             key=f"download_clip_{number}",
                         )
+                        if clip["srt"]:
+                            st.download_button(
+                                f"💬 Download subtitles {number} (.srt)",
+                                data=clip["srt"],
+                                file_name=f"ClipAI_{number}_subtitles.srt",
+                                mime="application/x-subrip",
+                                key=f"download_srt_{number}",
+                            )
 
                     with st.expander("View the transcript"):
                         st.text_area("Transcript", transcript, height=220)
