@@ -13,7 +13,7 @@ from groq import Groq
 MAX_UPLOAD_MB = 50
 MAX_VIDEO_SECONDS = 300          # 5 minutes per video
 MAX_AUDIO_MB = 24                # keep below Groq's documented 25 MB limit
-MAX_CLIPS_PER_VIDEO = 2  # Keep beta workload small; raise to 4-5 after load testing.
+MAX_CLIPS_PER_VIDEO = 5  # User can choose 2-5 clips; keep beta workload controlled.
 OUTPUT_WIDTH = 720
 OUTPUT_HEIGHT = 1280
 OUTPUT_FPS = 24
@@ -139,7 +139,7 @@ def write_clip_subtitles(segments, clip_start, clip_end, subtitle_path):
     return bool(entries)
 
 
-def validate_suggestions(data, duration):
+def validate_suggestions(data, duration, requested_clip_count):
     if not isinstance(data, dict):
         raise ValueError("AI returned an invalid response.")
 
@@ -148,7 +148,7 @@ def validate_suggestions(data, duration):
         raise ValueError("AI clip suggestions were not a list.")
 
     valid = []
-    for item in suggestions[:MAX_CLIPS_PER_VIDEO]:
+    for item in suggestions[:requested_clip_count]:
         if not isinstance(item, dict):
             continue
         try:
@@ -177,7 +177,7 @@ def validate_suggestions(data, duration):
 # ---------------- PAGE CONTENT ----------------
 st.title("🎬 ClipAI")
 st.subheader("Turn long videos into short clips with AI")
-st.write("Upload a short video. ClipAI finds interesting moments and creates vertical 9:16 MP4 clips.")
+st.write("Upload a video, choose how many moments to find, and create vertical 9:16 MP4 clips.")
 
 burn_captions = st.checkbox("Burn captions into the video", value=True, help="Turn this off for faster rendering. An SRT subtitle file will still be available.")
 layout_choice = st.radio(
@@ -187,6 +187,12 @@ layout_choice = st.radio(
     help="Fill screen looks more like a Reel. Fit full video keeps the entire original frame visible."
 )
 st.caption("Fast beta export: 720 × 1280 at 24 FPS. Higher-resolution export can be added after performance testing.")
+requested_clip_count = st.select_slider(
+    "How many clips should ClipAI try to create?",
+    options=[2, 3, 4, 5],
+    value=2,
+    help="More clips can take longer to process. ClipAI may return fewer if the video does not contain enough distinct moments.",
+)
 
 st.info(
     "Beta limits: up to 50 MB upload, 5-minute video, "
@@ -320,7 +326,8 @@ if uploaded_file is not None:
                                         "role": "system",
                                         "content": (
                                             "You are an expert short-form video editor. "
-                                            "Find at most 2 self-contained, engaging moments. "
+                                            f"Find at most {requested_clip_count} self-contained, engaging moments. "
+                                            "Return the strongest distinct moments first, and avoid overlapping or repeated ideas. "
                                             "Each clip must be 20-60 seconds. Use only the "
                                             "provided timestamps, stay inside the video duration, "
                                             "avoid repeated moments, and return valid JSON only "
@@ -331,21 +338,22 @@ if uploaded_file is not None:
                                         "role": "user",
                                         "content": (
                                             f"Video duration: {duration:.2f} seconds.\n"
-                                            "Select the strongest moments from this transcript:\n"
+                                            f"Select up to {requested_clip_count} strongest, distinct moments from this transcript. "
+                                            "If there are not enough good moments, return fewer rather than weak clips.\n"
                                             + timestamped_transcript
                                         ),
                                     },
                                 ],
                                 response_format={"type": "json_object"},
                                 temperature=0.2,
-                                max_completion_tokens=1200,
+                                max_completion_tokens=2000,
                             )
 
                         ai_text = response.choices[0].message.content
                         if not ai_text:
                             raise ValueError("AI returned an empty clip-selection response.")
                         ai_data = json.loads(ai_text)
-                        clips = validate_suggestions(ai_data, duration)
+                        clips = validate_suggestions(ai_data, duration, requested_clip_count)
                         if not clips:
                             raise ValueError("AI could not find suitable 20-60 second clips in this video.")
 
