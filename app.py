@@ -1,9 +1,13 @@
+import ipaddress
 import json
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -100,6 +104,140 @@ def extract_youtube_video_id(value):
     except (AttributeError, IndexError, ValueError):
         return None
     return None
+
+
+class MemoryVideo:
+    """Small UploadedFile-compatible wrapper for a fetched direct video URL."""
+    def __init__(self, name, data):
+        self.name = name
+        self._data = data
+        self.size = len(data)
+
+    def getvalue(self):
+        return self._data
+
+
+def validate_public_https_url(value):
+    """Reject non-HTTPS, local, private, and otherwise unsafe URL targets."""
+    try:
+        parsed = urlparse(value.strip())
+        if parsed.scheme.lower() != "https":
+            raise ValueError("Use a direct HTTPS video-file link.")
+        if not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("This link is not a valid public HTTPS URL.")
+        if parsed.port not in (None, 443):
+            raise ValueError("Only standard HTTPS links on port 443 are supported.")
+
+        host = parsed.hostname.rstrip(".").lower()
+        if host in {"localhost", "metadata.google.internal"} or host.endswith((".local", ".internal", ".localhost")):
+            raise ValueError("Private or local network links are not supported.")
+        if host in {
+            "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
+            "youtube-nocookie.com", "www.youtube-nocookie.com",
+        }:
+            raise ValueError(
+                "YouTube watch links can be previewed but not fetched as media here. "
+                "For your own channel video, download it from YouTube Studio and upload the file."
+            )
+
+        try:
+            ip = ipaddress.ip_address(host)
+            if not ip.is_global:
+                raise ValueError("Private or local network links are not supported.")
+        except ValueError as exc:
+            # If this is not a literal IP address, resolve the hostname and reject
+            # it if any returned address is not globally routable.
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                try:
+                    records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+                except OSError:
+                    raise ValueError("Could not resolve this public video host.") from None
+                addresses = {record[4][0].split("%", 1)[0] for record in records}
+                if not addresses or any(not ipaddress.ip_address(addr).is_global for addr in addresses):
+                    raise ValueError("This link does not point to a public internet host.") from None
+            else:
+                raise exc
+        return parsed
+    except (AttributeError, TypeError, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError("Please enter a valid HTTPS video-file link.") from None
+
+
+def download_direct_video(value, max_bytes):
+    """Fetch a direct video file URL, refusing redirects and oversized responses.
+
+    This beta helper is intended only for public, direct media-file URLs that the
+    user owns or is authorized to process. Platform watch pages are not downloaded.
+    """
+    parsed = validate_public_https_url(value)
+    extension = Path(parsed.path).suffix.lower()
+    allowed_extensions = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+    if extension and extension not in allowed_extensions:
+        raise ValueError("The URL must point directly to an MP4, MOV, WebM, MKV, or AVI file.")
+
+    class RejectRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(RejectRedirect)
+    request = urllib.request.Request(
+        value.strip(),
+        headers={"User-Agent": "ClipAI-beta/1.0", "Accept": "video/*,application/octet-stream;q=0.8"},
+        method="GET",
+    )
+    try:
+        response = opener.open(request, timeout=20)
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ValueError("This host redirects the download. Use a direct, non-redirecting file URL.") from None
+        raise ValueError(f"The video host returned HTTP {exc.code}. Check that the file link is public.") from None
+    except Exception:
+        raise ValueError("Could not reach this video link. Check that it is a direct public file URL.") from None
+
+    with response:
+        content_type = response.headers.get_content_type().lower()
+        type_to_ext = {
+            "video/mp4": ".mp4",
+            "video/quicktime": ".mov",
+            "video/webm": ".webm",
+            "video/x-matroska": ".mkv",
+            "video/x-msvideo": ".avi",
+            "application/octet-stream": extension or ".mp4",
+        }
+        if content_type not in type_to_ext:
+            raise ValueError("The URL did not return a supported video file.")
+
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > max_bytes:
+                    raise ValueError(f"The linked video is larger than the {max_bytes // (1024 * 1024)} MB beta limit.")
+            except ValueError as exc:
+                if "larger than" in str(exc):
+                    raise
+
+        chunks = []
+        total = 0
+        while True:
+            chunk = response.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"The linked video is larger than the {max_bytes // (1024 * 1024)} MB beta limit.")
+            chunks.append(chunk)
+
+    if not total:
+        raise ValueError("The video file from this link is empty.")
+
+    final_extension = extension or type_to_ext[content_type]
+    filename = Path(parsed.path).name or f"linked_video{final_extension}"
+    if Path(filename).suffix.lower() not in allowed_extensions:
+        filename = f"linked_video{final_extension}"
+    return filename, b"".join(chunks)
 
 
 def run_command(command, timeout=300):
@@ -402,13 +540,13 @@ st.markdown(
       <div class="clipai-hero-card">
         <div class="clipai-mini-label">Your creator workflow</div>
         <div class="clipai-mini-title">From full-length to share-ready</div>
-        <div class="clipai-mini-copy">Upload a video, choose how many clips to try, then preview and download each result.</div>
+        <div class="clipai-mini-copy">Upload a video or load a direct authorized file link, choose how many clips to try, then preview and download each result.</div>
         <div class="clipai-statrow">
           <span class="clipai-stat">01 · Upload</span>
           <span class="clipai-stat">02 · Find moments</span>
           <span class="clipai-stat">03 · Export</span>
         </div>
-        <div class="clipai-mini-copy" style="margin-top:14px">Video-link import is planned next for supported and authorized sources.</div>
+        <div class="clipai-mini-copy" style="margin-top:14px">Direct HTTPS video-file links are supported in this beta. YouTube watch links remain preview-only.</div>
       </div>
     </section>
     <div id="create" class="clipai-section-kicker">Create</div>
@@ -418,30 +556,67 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------------- VIDEO LINK PREVIEW (NO PLATFORM DOWNLOADING) ----------------
+# ---------------- VIDEO LINK INPUTS ----------------
 st.markdown(
     '<div class="clipai-section-kicker">Video link</div>'
-    '<div class="clipai-section-title">Have a YouTube link?</div>'
-    '<div class="clipai-section-copy">Paste it to preview the video. To create clips, upload a video file you own or are authorized to edit below.</div>',
+    '<div class="clipai-section-title">Use a video link</div>'
+    '<div class="clipai-section-copy">YouTube links can be previewed. For automatic processing without manual upload, use a direct HTTPS link to a video file you own or are authorized to edit.</div>',
     unsafe_allow_html=True,
 )
 youtube_url = st.text_input(
-    "Paste YouTube video link",
+    "YouTube link (preview only)",
     placeholder="https://www.youtube.com/watch?v=...",
-    help="Supports standard YouTube watch, Shorts, embed, and youtu.be links for preview.",
+    help="YouTube watch, Shorts, embed, and youtu.be links can be previewed here.",
 )
 if youtube_url.strip():
     youtube_id = extract_youtube_video_id(youtube_url)
     if youtube_id:
         st.video(f"https://www.youtube.com/watch?v={youtube_id}", width=420)
         st.info(
-            "YouTube link preview is ready. ClipAI does not download or copy YouTube audio/video from a URL. "
-            "For a video you uploaded, download your own file from YouTube Studio and upload it below. "
-            "Processing other YouTube videos requires the relevant rights and any platform permissions."
+            "YouTube preview only: ClipAI does not download YouTube media from watch URLs. "
+            "For a video on your own channel, download the MP4 through YouTube Studio and upload it, "
+            "or provide a direct media-file URL from storage you control."
         )
-        st.markdown("[Open YouTube Studio](https://studio.youtube.com/) to access videos on your own channel.")
+        st.markdown("[Open YouTube Studio](https://studio.youtube.com/)")
     else:
-        st.error("This does not look like a supported YouTube video link. Paste a watch, Shorts, embed, or youtu.be URL.")
+        st.error("This does not look like a supported YouTube video link.")
+
+with st.expander("Use a direct video-file link (MP4 / MOV / WebM)", expanded=False):
+    direct_video_url = st.text_input(
+        "Direct HTTPS video-file URL",
+        placeholder="https://your-storage.example.com/my-video.mp4",
+        help="Must link directly to a public video file, not a webpage or a YouTube watch page.",
+        key="clipai_direct_video_url",
+    )
+    rights_confirmed = st.checkbox(
+        "I own this video or have permission to download and edit it.",
+        key="clipai_direct_video_rights",
+    )
+    if st.button("Load video from direct link", key="clipai_load_direct_video"):
+        if not direct_video_url.strip():
+            st.error("Paste a direct video-file URL first.")
+        elif not rights_confirmed:
+            st.error("Please confirm that you own the video or have permission to process it.")
+        else:
+            try:
+                with st.spinner("Fetching the authorized video file..."):
+                    fetched_name, fetched_bytes = download_direct_video(
+                        direct_video_url,
+                        MAX_UPLOAD_MB * 1024 * 1024,
+                    )
+                st.session_state["clipai_direct_video"] = {
+                    "name": fetched_name,
+                    "data": fetched_bytes,
+                }
+                st.success(f"Direct video link loaded: {fetched_name} ({len(fetched_bytes) / (1024 * 1024):.1f} MB)")
+            except Exception as exc:
+                st.error(f"Could not load this direct video link: {str(exc)[:400]}")
+
+    if st.session_state.get("clipai_direct_video"):
+        st.caption("A direct video file is loaded and ready for ClipAI processing.")
+        if st.button("Remove loaded direct video", key="clipai_clear_direct_video"):
+            st.session_state.pop("clipai_direct_video", None)
+            st.rerun()
 
 st.divider()
 settings_a, settings_b, settings_c = st.columns([1, 1.35, 1])
@@ -489,19 +664,25 @@ with usage_col2:
     st.caption(f"This browser session: {session_jobs}/{MAX_JOBS_PER_SESSION_PER_DAY} jobs used today.")
 
 st.divider()
-st.markdown('<div class="clipai-section-kicker">Upload</div><div class="clipai-section-title">Upload the video file to create clips</div>', unsafe_allow_html=True)
+st.markdown('<div class="clipai-section-kicker">Create clips</div><div class="clipai-section-title">Upload a file or use a loaded direct link</div>', unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader(
+uploaded_file_widget = st.file_uploader(
     "📁 Upload your video",
     type=["mp4", "mov", "mkv", "avi", "webm"],
     max_upload_size=MAX_UPLOAD_MB,
     help=f"Maximum file size: {MAX_UPLOAD_MB} MB. Maximum video length: 5 minutes.",
 )
 
+uploaded_file = uploaded_file_widget
+if uploaded_file is None and st.session_state.get("clipai_direct_video"):
+    saved_video = st.session_state["clipai_direct_video"]
+    uploaded_file = MemoryVideo(saved_video["name"], saved_video["data"])
+
 if uploaded_file is not None:
     file_size_mb = uploaded_file.size / (1024 * 1024)
-    st.success(f"Video uploaded: {uploaded_file.name} ({file_size_mb:.1f} MB)")
-    st.video(uploaded_file, width=320)
+    source_label = "Direct video link loaded" if isinstance(uploaded_file, MemoryVideo) else "Video uploaded"
+    st.success(f"{source_label}: {uploaded_file.name} ({file_size_mb:.1f} MB)")
+    st.video(uploaded_file.getvalue(), width=320)
 
     if file_size_mb > MAX_UPLOAD_MB:
         st.error(f"Please upload a file smaller than {MAX_UPLOAD_MB} MB.")
@@ -810,7 +991,7 @@ st.markdown(
     <div id="how-it-works" class="clipai-section-kicker">Simple workflow</div>
     <div class="clipai-section-title">How ClipAI works</div>
     <div class="clipai-feature-grid">
-      <div class="clipai-feature"><div class="clipai-feature-icon">📤</div><div class="clipai-feature-title">1. Add your video</div><div class="clipai-feature-copy">Start with a video file you own or have permission to process.</div></div>
+      <div class="clipai-feature"><div class="clipai-feature-icon">📤</div><div class="clipai-feature-title">1. Add your video</div><div class="clipai-feature-copy">Upload a video or load a direct video-file link you own or have permission to process.</div></div>
       <div class="clipai-feature"><div class="clipai-feature-icon">🧠</div><div class="clipai-feature-title">2. Find strong moments</div><div class="clipai-feature-copy">AI reviews the spoken content and suggests distinct moments worth sharing.</div></div>
       <div class="clipai-feature"><div class="clipai-feature-icon">📲</div><div class="clipai-feature-title">3. Export your shorts</div><div class="clipai-feature-copy">Preview compact vertical clips, then download the MP4 and subtitle file.</div></div>
     </div>
