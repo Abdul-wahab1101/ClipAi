@@ -1,10 +1,12 @@
 import json
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import streamlit as st
 from groq import Groq
@@ -69,6 +71,35 @@ def get_value(item, key, default=None):
     if isinstance(item, dict):
         return item.get(key, default)
     return getattr(item, key, default)
+
+
+def extract_youtube_video_id(value):
+    """Return an 11-character YouTube video ID for common video URL formats."""
+    try:
+        parsed = urlparse(value.strip())
+        host = (parsed.hostname or "").lower()
+        allowed_hosts = {
+            "youtube.com", "www.youtube.com", "m.youtube.com",
+            "youtu.be", "youtube-nocookie.com", "www.youtube-nocookie.com",
+        }
+        if parsed.scheme not in ("https", "http") or host not in allowed_hosts:
+            return None
+
+        video_id = None
+        if host == "youtu.be":
+            video_id = parsed.path.strip("/").split("/")[0]
+        elif parsed.path.startswith("/shorts/"):
+            video_id = parsed.path.split("/", 2)[2].split("/")[0]
+        elif parsed.path.startswith("/embed/"):
+            video_id = parsed.path.split("/", 2)[2].split("/")[0]
+        else:
+            video_id = parse_qs(parsed.query).get("v", [None])[0]
+
+        if video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            return video_id
+    except (AttributeError, IndexError, ValueError):
+        return None
+    return None
 
 
 def run_command(command, timeout=300):
@@ -387,6 +418,32 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ---------------- VIDEO LINK PREVIEW (NO PLATFORM DOWNLOADING) ----------------
+st.markdown(
+    '<div class="clipai-section-kicker">Video link</div>'
+    '<div class="clipai-section-title">Have a YouTube link?</div>'
+    '<div class="clipai-section-copy">Paste it to preview the video. To create clips, upload a video file you own or are authorized to edit below.</div>',
+    unsafe_allow_html=True,
+)
+youtube_url = st.text_input(
+    "Paste YouTube video link",
+    placeholder="https://www.youtube.com/watch?v=...",
+    help="Supports standard YouTube watch, Shorts, embed, and youtu.be links for preview.",
+)
+if youtube_url.strip():
+    youtube_id = extract_youtube_video_id(youtube_url)
+    if youtube_id:
+        st.video(f"https://www.youtube.com/watch?v={youtube_id}", width=420)
+        st.info(
+            "YouTube link preview is ready. ClipAI does not download or copy YouTube audio/video from a URL. "
+            "For a video you uploaded, download your own file from YouTube Studio and upload it below. "
+            "Processing other YouTube videos requires the relevant rights and any platform permissions."
+        )
+        st.markdown("[Open YouTube Studio](https://studio.youtube.com/) to access videos on your own channel.")
+    else:
+        st.error("This does not look like a supported YouTube video link. Paste a watch, Shorts, embed, or youtu.be URL.")
+
+st.divider()
 settings_a, settings_b, settings_c = st.columns([1, 1.35, 1])
 with settings_a:
     burn_captions = st.checkbox(
@@ -432,7 +489,7 @@ with usage_col2:
     st.caption(f"This browser session: {session_jobs}/{MAX_JOBS_PER_SESSION_PER_DAY} jobs used today.")
 
 st.divider()
-st.markdown('<div class="clipai-section-kicker">Upload</div><div class="clipai-section-title">Choose your video</div>', unsafe_allow_html=True)
+st.markdown('<div class="clipai-section-kicker">Upload</div><div class="clipai-section-title">Upload the video file to create clips</div>', unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader(
     "📁 Upload your video",
