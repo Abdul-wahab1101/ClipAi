@@ -13,7 +13,10 @@ from groq import Groq
 MAX_UPLOAD_MB = 50
 MAX_VIDEO_SECONDS = 300          # 5 minutes per video
 MAX_AUDIO_MB = 24                # keep below Groq's documented 25 MB limit
-MAX_CLIPS_PER_VIDEO = 2
+MAX_CLIPS_PER_VIDEO = 2  # Keep beta workload small; raise to 4-5 after load testing.
+OUTPUT_WIDTH = 720
+OUTPUT_HEIGHT = 1280
+OUTPUT_FPS = 24
 MAX_JOBS_PER_SESSION_PER_DAY = 2
 MAX_JOBS_TOTAL_PER_APP_PER_DAY = 5
 
@@ -174,7 +177,16 @@ def validate_suggestions(data, duration):
 # ---------------- PAGE CONTENT ----------------
 st.title("🎬 ClipAI")
 st.subheader("Turn long videos into short clips with AI")
-st.write("Upload a short video. ClipAI finds interesting moments and creates vertical 9:16 MP4 clips with captions.")
+st.write("Upload a short video. ClipAI finds interesting moments and creates vertical 9:16 MP4 clips.")
+
+burn_captions = st.checkbox("Burn captions into the video", value=True, help="Turn this off for faster rendering. An SRT subtitle file will still be available.")
+layout_choice = st.radio(
+    "Vertical video layout",
+    ["Fill screen (may crop left/right edges)", "Fit full video (black bars)"],
+    horizontal=True,
+    help="Fill screen looks more like a Reel. Fit full video keeps the entire original frame visible."
+)
+st.caption("Fast beta export: 720 × 1280 at 24 FPS. Higher-resolution export can be added after performance testing.")
 
 st.info(
     "Beta limits: up to 50 MB upload, 5-minute video, "
@@ -349,85 +361,62 @@ if uploaded_file is not None:
                                 subtitle_path,
                             )
 
-                            # Build a 9:16 canvas: blurred fill behind the full original frame.
-                            # This avoids cutting off people or text at the left/right edges.
-                            base_filter = (
-                                "[0:v]split=2[bg][fg];"
-                                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-                                "crop=1080:1920,boxblur=22:10[bg2];"
-                                "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fg2];"
-                                "[bg2][fg2]overlay=(W-w)/2:(H-h)/2"
-                            )
+                            # Fast 9:16 export. One scale/crop (or scale/pad) pass is
+                            # much lighter than the previous blurred-background composition.
+                            if layout_choice == "Fill screen (may crop left/right edges)":
+                                video_filter = (
+                                    f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=increase,"
+                                    f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},fps={OUTPUT_FPS}"
+                                )
+                            else:
+                                video_filter = (
+                                    f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
+                                    f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                                    f"fps={OUTPUT_FPS}"
+                                )
 
-                            with st.spinner(f"Creating vertical clip {number} of {len(clips)}..."):
-                                filter_with_subtitles = None
-                                if has_subtitles:
-                                    style = (
-                                        "FontName=DejaVu Sans,FontSize=42,"
-                                        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-                                        "BorderStyle=1,Outline=3,Shadow=1,"
-                                        "Alignment=2,MarginV=145"
-                                    )
-                                    filter_with_subtitles = (
-                                        base_filter
-                                        + f",subtitles={subtitle_path.as_posix()}:force_style='{style}'"
-                                        + "[v]"
-                                    )
+                            if burn_captions and has_subtitles:
+                                style = (
+                                    "FontName=DejaVu Sans,FontSize=30,"
+                                    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+                                    "BorderStyle=1,Outline=2,Shadow=1,"
+                                    "Alignment=2,MarginV=85"
+                                )
+                                video_filter += (
+                                    f",subtitles={subtitle_path.as_posix()}:force_style='{style}'"
+                                )
 
-                                common_args = [
+                            with st.spinner(f"Creating fast vertical clip {number} of {len(clips)}..."):
+                                encode_args = [
                                     "ffmpeg", "-y",
                                     "-ss", str(clip["start"]),
                                     "-i", str(video_path),
                                     "-t", str(clip_length),
+                                    "-vf", video_filter,
+                                    "-map", "0:v:0", "-map", "0:a:0?",
+                                    "-c:v", "libx264", "-preset", "ultrafast",
+                                    "-crf", "25", "-threads", "2",
+                                    "-c:a", "aac", "-b:a", "96k",
+                                    "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                                    str(output_path),
                                 ]
-
-                                if filter_with_subtitles:
-                                    try:
-                                        run_command(
-                                            common_args + [
-                                                "-filter_complex", filter_with_subtitles,
-                                                "-map", "[v]", "-map", "0:a:0?",
-                                                "-r", "30",
-                                                "-c:v", "libx264", "-preset", "ultrafast",
-                                                "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-                                                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                                                str(output_path),
-                                            ],
-                                            timeout=240,
-                                        )
-                                    except RuntimeError:
-                                        # Fallback: still create a vertical MP4 if subtitle rendering
-                                        # is unavailable on the hosting FFmpeg build.
+                                try:
+                                    run_command(encode_args, timeout=240)
+                                except RuntimeError:
+                                    # If subtitle rendering is unavailable, retry without
+                                    # burned captions; the separate SRT remains downloadable.
+                                    if burn_captions and has_subtitles:
                                         output_path.unlink(missing_ok=True)
                                         st.warning(
-                                            "This server could not burn subtitles into the video. "
-                                            "A separate SRT subtitle file will be provided."
+                                            "Could not burn captions into this MP4 on the current server. "
+                                            "The vertical clip will still be created, and you can download its SRT file."
                                         )
-                                        run_command(
-                                            common_args + [
-                                                "-filter_complex", base_filter + "[v]",
-                                                "-map", "[v]", "-map", "0:a:0?",
-                                                "-r", "30",
-                                                "-c:v", "libx264", "-preset", "ultrafast",
-                                                "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-                                                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                                                str(output_path),
-                                            ],
-                                            timeout=240,
+                                        encode_args[encode_args.index(video_filter)] = (
+                                            video_filter.rsplit(",subtitles=", 1)[0]
                                         )
-                                else:
-                                    run_command(
-                                        common_args + [
-                                            "-filter_complex", base_filter + "[v]",
-                                            "-map", "[v]", "-map", "0:a:0?",
-                                            "-r", "30",
-                                            "-c:v", "libx264", "-preset", "ultrafast",
-                                            "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-                                            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                                            str(output_path),
-                                        ],
-                                        timeout=240,
-                                    )
+                                        run_command(encode_args, timeout=240)
+                                    else:
+                                        raise
 
                             if output_path.exists() and output_path.stat().st_size > 0:
                                 generated.append(
