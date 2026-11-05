@@ -280,49 +280,159 @@ def validate_suggestions(data, duration, requested_clip_count):
     return valid
 
 
-# ---------------- PAGE CONTENT ----------------
-st.title("🎬 ClipAI")
-st.subheader("Turn long videos into short clips with AI")
-st.write("Upload a video, choose how many moments to find, and create vertical 9:16 MP4 clips.")
-
-burn_captions = st.checkbox("Burn captions into the video", value=True, help="Turn this off for faster rendering. A separate SRT subtitle file will still be available.")
-layout_choice = st.radio(
-    "Vertical video layout",
-    ["Fill screen (may crop left/right edges)", "Fit full video (black bars)"],
-    horizontal=True,
-    help="Fill screen looks more like a Reel. Fit full video keeps the entire original frame visible."
+# ---------------- PROFESSIONAL CLIPAI INTERFACE ----------------
+st.markdown(
+    """
+    <style>
+    :root { --clip-bg:#0b0d14; --clip-panel:#121725; --clip-panel-2:#171e2d;
+            --clip-line:rgba(255,255,255,.10); --clip-muted:#aab3c5;
+            --clip-accent:#9b8cff; --clip-accent-2:#65d6c4; }
+    [data-testid="stAppViewContainer"] { background:var(--clip-bg); }
+    [data-testid="stHeader"] { background:rgba(11,13,20,.86); }
+    [data-testid="stMainBlockContainer"] { max-width:1160px; padding-top:1.25rem; padding-bottom:3rem; }
+    h1,h2,h3 { letter-spacing:-.035em; }
+    .clipai-nav { display:flex; align-items:center; justify-content:space-between; gap:18px;
+        padding:12px 0 22px; border-bottom:1px solid var(--clip-line); margin-bottom:30px; }
+    .clipai-brand { color:#fff !important; text-decoration:none !important; font-size:1.34rem;
+        font-weight:800; letter-spacing:-.04em; }
+    .clipai-brand span { color:var(--clip-accent); }
+    .clipai-navlinks { display:flex; gap:22px; flex-wrap:wrap; }
+    .clipai-navlinks a { color:#c6cede !important; text-decoration:none !important; font-size:.88rem; }
+    .clipai-navlinks a:hover { color:#fff !important; }
+    .clipai-pill { border:1px solid rgba(155,140,255,.35); color:#c9c0ff; background:rgba(155,140,255,.10);
+        border-radius:999px; padding:6px 11px; font-size:.75rem; white-space:nowrap; }
+    .clipai-hero { display:grid; grid-template-columns:1.35fr .85fr; gap:25px; align-items:center;
+        padding:30px; border:1px solid var(--clip-line); border-radius:22px;
+        background:radial-gradient(ellipse at 85% 5%,rgba(155,140,255,.18),transparent 42%),
+                   radial-gradient(ellipse at 5% 95%,rgba(101,214,196,.10),transparent 38%),#111624;
+        margin-bottom:26px; }
+    .clipai-eyebrow { color:#bdb2ff; text-transform:uppercase; letter-spacing:.13em; font-size:.72rem; font-weight:800; }
+    .clipai-hero h1 { color:#fff; font-size:clamp(2.1rem,5vw,3.65rem); line-height:1.04; margin:.65rem 0 .8rem; }
+    .clipai-hero h1 span { background:linear-gradient(90deg,#b7aaff,#71dfd0); -webkit-background-clip:text; background-clip:text; color:transparent; }
+    .clipai-hero p { color:#b9c2d2; font-size:1.02rem; line-height:1.65; max-width:650px; margin-bottom:0; }
+    .clipai-hero-card { border:1px solid rgba(255,255,255,.12); border-radius:17px; padding:19px;
+        background:rgba(8,11,19,.55); }
+    .clipai-mini-label { color:#95a0b5; text-transform:uppercase; font-size:.68rem; letter-spacing:.12em; }
+    .clipai-mini-title { color:#fff; font-weight:750; font-size:1.18rem; margin:7px 0 5px; }
+    .clipai-mini-copy { color:#aeb8c9; font-size:.82rem; line-height:1.5; }
+    .clipai-statrow { display:flex; gap:9px; flex-wrap:wrap; margin-top:17px; }
+    .clipai-stat { border:1px solid var(--clip-line); background:rgba(255,255,255,.045); border-radius:10px;
+        padding:9px 11px; color:#d7dced; font-size:.78rem; }
+    .clipai-section-kicker { color:#a99cff; font-size:.72rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
+    .clipai-section-title { color:#fff; font-weight:800; font-size:1.65rem; letter-spacing:-.04em; margin:4px 0 5px; }
+    .clipai-section-copy { color:var(--clip-muted); font-size:.91rem; margin-bottom:14px; }
+    .clipai-feature-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:13px; margin:12px 0 26px; }
+    .clipai-feature { background:var(--clip-panel); border:1px solid var(--clip-line); border-radius:15px; padding:17px; }
+    .clipai-feature-icon { font-size:1.35rem; margin-bottom:9px; }
+    .clipai-feature-title { color:#f4f5fa; font-weight:750; margin-bottom:5px; }
+    .clipai-feature-copy { color:#aab3c5; font-size:.82rem; line-height:1.5; }
+    .clipai-limit { color:#c9d5e8; background:rgba(101,214,196,.08); border:1px solid rgba(101,214,196,.2);
+        border-radius:12px; padding:12px 15px; font-size:.83rem; margin:12px 0; }
+    .clipai-footer { border-top:1px solid var(--clip-line); padding-top:18px; margin-top:28px;
+        color:#919caf; font-size:.78rem; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .clipai-footer a { color:#c7bdff !important; text-decoration:none !important; }
+    div[data-testid="stFileUploader"] section { border-radius:14px; }
+    div[data-testid="stButton"] button[kind="primary"] { border-radius:11px; font-weight:750; }
+    @media (max-width:760px) {
+      [data-testid="stMainBlockContainer"] { padding-left:1rem; padding-right:1rem; }
+      .clipai-nav { align-items:flex-start; flex-direction:column; }
+      .clipai-navlinks { gap:14px; }
+      .clipai-hero { grid-template-columns:1fr; padding:22px; }
+      .clipai-hero h1 { font-size:2.35rem; }
+      .clipai-feature-grid { grid-template-columns:1fr; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
-st.caption("Fast beta export: 720 × 1280 at 24 FPS. Higher-resolution export can be added after performance testing.")
-requested_clip_count = st.select_slider(
-    "How many clips should ClipAI try to create?",
-    options=[2, 3, 4, 5],
-    value=2,
-    help="More clips can take longer to process. ClipAI may return fewer if the video does not contain enough distinct moments.",
+
+st.markdown(
+    """
+    <div id="top" class="clipai-nav">
+      <a class="clipai-brand" href="#top">🎬 Clip<span>AI</span></a>
+      <div class="clipai-navlinks">
+        <a href="#create">Create clips</a>
+        <a href="#how-it-works">How it works</a>
+        <a href="#features">Features</a>
+      </div>
+      <span class="clipai-pill">FREE BETA</span>
+    </div>
+    <section class="clipai-hero">
+      <div>
+        <div class="clipai-eyebrow">AI short-form video studio</div>
+        <h1>One long video.<br><span>More moments worth sharing.</span></h1>
+        <p>ClipAI finds engaging moments in your video and turns them into vertical shorts with optional word-highlight captions—ready for your next post.</p>
+        <div class="clipai-statrow">
+          <span class="clipai-stat">✂️ AI moment selection</span>
+          <span class="clipai-stat">📱 Vertical 9:16 exports</span>
+          <span class="clipai-stat">💬 Captions option</span>
+        </div>
+      </div>
+      <div class="clipai-hero-card">
+        <div class="clipai-mini-label">Your creator workflow</div>
+        <div class="clipai-mini-title">From full-length to share-ready</div>
+        <div class="clipai-mini-copy">Upload a video, choose how many clips to try, then preview and download each result.</div>
+        <div class="clipai-statrow">
+          <span class="clipai-stat">01 · Upload</span>
+          <span class="clipai-stat">02 · Find moments</span>
+          <span class="clipai-stat">03 · Export</span>
+        </div>
+        <div class="clipai-mini-copy" style="margin-top:14px">Video-link import is planned next for supported and authorized sources.</div>
+      </div>
+    </section>
+    <div id="create" class="clipai-section-kicker">Create</div>
+    <div class="clipai-section-title">Make your first clips</div>
+    <div class="clipai-section-copy">Choose your output preferences, upload a video, and let ClipAI do the editing work.</div>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.info(
-    "Beta limits: up to 50 MB upload, 5-minute video, "
-    "2 jobs per browser session per day, and 5 jobs total per app per day."
+settings_a, settings_b, settings_c = st.columns([1, 1.35, 1])
+with settings_a:
+    burn_captions = st.checkbox(
+        "Burn captions into the video",
+        value=True,
+        help="Turn this off for faster rendering. A separate SRT file will still be available.",
+    )
+with settings_b:
+    layout_choice = st.radio(
+        "Vertical video layout",
+        ["Fill screen (may crop left/right edges)", "Fit full video (black bars)"],
+        horizontal=False,
+        help="Fill screen looks like a Reel. Fit full video keeps the entire original frame visible.",
+    )
+with settings_c:
+    requested_clip_count = st.select_slider(
+        "Clips to create",
+        options=[2, 3, 4, 5],
+        value=2,
+        help="More clips can take longer. ClipAI may return fewer if there are not enough distinct moments.",
+    )
+
+st.caption("Fast beta export: 720 × 1280 at 24 FPS. We are optimizing quality and processing time before increasing limits.")
+
+st.markdown(
+    """
+    <div class="clipai-limit"><b>Beta limits:</b> 50 MB upload · 5-minute video · 2 jobs per browser session per day · 5 jobs shared across the app per day.</div>
+    """,
+    unsafe_allow_html=True,
 )
 
 used_today = guard.get_usage()
-st.caption(
-    f"App-wide beta usage today: {used_today}/{MAX_JOBS_TOTAL_PER_APP_PER_DAY} jobs "
-    "(UTC reset)."
-)
-
-# Session-level daily counter
 current_day = datetime.now(timezone.utc).date().isoformat()
 if st.session_state.get("clipai_session_day") != current_day:
     st.session_state["clipai_session_day"] = current_day
     st.session_state["clipai_session_jobs"] = 0
-
 session_jobs = st.session_state.get("clipai_session_jobs", 0)
-st.caption(
-    f"This browser session: {session_jobs}/{MAX_JOBS_PER_SESSION_PER_DAY} jobs used today."
-)
+
+usage_col1, usage_col2 = st.columns(2)
+with usage_col1:
+    st.caption(f"Shared beta usage today: {used_today}/{MAX_JOBS_TOTAL_PER_APP_PER_DAY} jobs (UTC reset).")
+with usage_col2:
+    st.caption(f"This browser session: {session_jobs}/{MAX_JOBS_PER_SESSION_PER_DAY} jobs used today.")
 
 st.divider()
+st.markdown('<div class="clipai-section-kicker">Upload</div><div class="clipai-section-title">Choose your video</div>', unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader(
     "📁 Upload your video",
@@ -446,12 +556,41 @@ if uploaded_file is not None:
                                         "content": (
                                             f"Video duration: {duration:.2f} seconds.\n"
                                             f"Select up to {requested_clip_count} strongest, distinct moments from this transcript. "
-                                            "If there are not enough good moments, return fewer rather than weak clips.\n"
+                                            "If there are not enough good moments, return fewer rather than weak clips. "
+                                            "Respond as JSON matching this exact shape: "
+                                            '{"clips":[{"start":10.0,"end":35.0,"title":"Short title","reason":"Why it is engaging"}]}.\n'
                                             + timestamped_transcript
                                         ),
                                     },
                                 ],
-                                response_format={"type": "json_object"},
+                                response_format={
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                        "name": "clip_suggestions",
+                                        "strict": True,
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "clips": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "start": {"type": "number"},
+                                                            "end": {"type": "number"},
+                                                            "title": {"type": "string"},
+                                                            "reason": {"type": "string"},
+                                                        },
+                                                        "required": ["start", "end", "title", "reason"],
+                                                        "additionalProperties": False,
+                                                    },
+                                                }
+                                            },
+                                            "required": ["clips"],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                },
                                 temperature=0.2,
                                 max_completion_tokens=2000,
                             )
@@ -609,5 +748,25 @@ if uploaded_file is not None:
                     else:
                         st.error(f"ClipAI could not finish this job: {error_text[:700]}")
 
-st.divider()
-st.caption("© 2026 ClipAI | Free beta. Limits may change while we test.")
+st.markdown(
+    """
+    <div id="how-it-works" class="clipai-section-kicker">Simple workflow</div>
+    <div class="clipai-section-title">How ClipAI works</div>
+    <div class="clipai-feature-grid">
+      <div class="clipai-feature"><div class="clipai-feature-icon">📤</div><div class="clipai-feature-title">1. Add your video</div><div class="clipai-feature-copy">Start with a video file you own or have permission to process.</div></div>
+      <div class="clipai-feature"><div class="clipai-feature-icon">🧠</div><div class="clipai-feature-title">2. Find strong moments</div><div class="clipai-feature-copy">AI reviews the spoken content and suggests distinct moments worth sharing.</div></div>
+      <div class="clipai-feature"><div class="clipai-feature-icon">📲</div><div class="clipai-feature-title">3. Export your shorts</div><div class="clipai-feature-copy">Preview compact vertical clips, then download the MP4 and subtitle file.</div></div>
+    </div>
+    <div id="features" class="clipai-section-kicker">Built for creators</div>
+    <div class="clipai-feature-grid">
+      <div class="clipai-feature"><div class="clipai-feature-icon">🎯</div><div class="clipai-feature-title">Distinct clip ideas</div><div class="clipai-feature-copy">Prioritizes useful, surprising, entertaining, or memorable moments.</div></div>
+      <div class="clipai-feature"><div class="clipai-feature-icon">💬</div><div class="clipai-feature-title">Captions when you need them</div><div class="clipai-feature-copy">Choose burned-in captions or download a separate subtitle file.</div></div>
+      <div class="clipai-feature"><div class="clipai-feature-icon">⚡</div><div class="clipai-feature-title">Lightweight beta exports</div><div class="clipai-feature-copy">720 × 1280 exports help us test a faster workflow on limited free hosting.</div></div>
+    </div>
+    <div class="clipai-footer">
+      <span>© 2026 ClipAI · Free beta. Features and limits may change during testing.</span>
+      <span><a href="#top">Back to top ↑</a> · Please upload content you own or are authorized to use.</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
