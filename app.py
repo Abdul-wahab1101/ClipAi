@@ -139,6 +139,112 @@ def write_clip_subtitles(segments, clip_start, clip_end, subtitle_path):
     return bool(entries)
 
 
+
+def ass_time(seconds):
+    """Convert seconds to ASS timestamp (h:mm:ss.cc)."""
+    total_centiseconds = max(0, int(round(float(seconds) * 100)))
+    hours, remainder = divmod(total_centiseconds, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    whole_seconds, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{whole_seconds:02d}.{centiseconds:02d}"
+
+
+def escape_ass_text(value):
+    """Escape text that has special meaning in ASS subtitle files."""
+    return (
+        str(value)
+        .replace("\\", r"\\")
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("\n", " ")
+        .replace("\r", " ")
+    )
+
+
+def write_word_highlight_ass(words, clip_start, clip_end, subtitle_path):
+    """Write compact, bottom-positioned captions with one active word highlighted.
+
+    Each caption group contains up to four words. A timed event is emitted for
+    each spoken word; only that word is yellow while the other words stay white.
+    """
+    timed_words = []
+    for item in words or []:
+        start = get_value(item, "start")
+        end = get_value(item, "end")
+        word = get_value(item, "word", get_value(item, "text", ""))
+        word = str(word or "").strip()
+        if start is None or end is None or not word:
+            continue
+        try:
+            start = float(start)
+            end = float(end)
+        except (TypeError, ValueError):
+            continue
+
+        start = max(start, clip_start)
+        end = min(end, clip_end)
+        if end <= start:
+            continue
+        timed_words.append({
+            "start": start - clip_start,
+            "end": end - clip_start,
+            "word": word,
+        })
+
+    if not timed_words:
+        return False
+
+    # Build short readable caption groups: up to four words or a sentence break.
+    groups = []
+    current = []
+    for item in timed_words:
+        current.append(item)
+        punctuation_break = item["word"].endswith((".", "!", "?", ";", ":"))
+        group_text_length = sum(len(part["word"]) + 1 for part in current)
+        if len(current) >= 4 or punctuation_break or group_text_length >= 30:
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+
+    header = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 720",
+        "PlayResY: 1280",
+        "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        # Smaller, bold, white captions; the active word is colored via inline ASS tags.
+        "Style: Default,DejaVu Sans,28,&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,42,42,175,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+
+    dialogue = []
+    for group in groups:
+        plain_words = [escape_ass_text(part["word"]) for part in group]
+        for active_index, active in enumerate(group):
+            rendered = []
+            for index, word in enumerate(plain_words):
+                if index == active_index:
+                    rendered.append(r"{\c&H0000D7FF&}" + word + r"{\c&H00FFFFFF&}")
+                else:
+                    rendered.append(word)
+            text = " ".join(rendered)
+            start = active["start"]
+            end = max(active["end"], start + 0.06)
+            dialogue.append(
+                f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}"
+            )
+
+    subtitle_path.write_text("\n".join(header + dialogue) + "\n", encoding="utf-8")
+    return bool(dialogue)
+
+
 def validate_suggestions(data, duration, requested_clip_count):
     if not isinstance(data, dict):
         raise ValueError("AI returned an invalid response.")
@@ -179,7 +285,7 @@ st.title("🎬 ClipAI")
 st.subheader("Turn long videos into short clips with AI")
 st.write("Upload a video, choose how many moments to find, and create vertical 9:16 MP4 clips.")
 
-burn_captions = st.checkbox("Burn captions into the video", value=True, help="Turn this off for faster rendering. An SRT subtitle file will still be available.")
+burn_captions = st.checkbox("Burn captions into the video", value=True, help="Turn this off for faster rendering. A separate SRT subtitle file will still be available.")
 layout_choice = st.radio(
     "Vertical video layout",
     ["Fill screen (may crop left/right edges)", "Fit full video (black bars)"],
@@ -228,7 +334,7 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
     file_size_mb = uploaded_file.size / (1024 * 1024)
     st.success(f"Video uploaded: {uploaded_file.name} ({file_size_mb:.1f} MB)")
-    st.video(uploaded_file)
+    st.video(uploaded_file, width=320)
 
     if file_size_mb > MAX_UPLOAD_MB:
         st.error(f"Please upload a file smaller than {MAX_UPLOAD_MB} MB.")
@@ -288,12 +394,13 @@ if uploaded_file is not None:
                                     file=audio_file,
                                     model="whisper-large-v3-turbo",
                                     response_format="verbose_json",
-                                    timestamp_granularities=["segment"],
+                                    timestamp_granularities=["word", "segment"],
                                     temperature=0.0,
                                 )
 
                         transcript = get_value(transcription, "text", "")
                         segments = get_value(transcription, "segments", []) or []
+                        word_timestamps = get_value(transcription, "words", []) or []
                         if not transcript or not segments:
                             raise ValueError("No clear speech was detected. Try a video with audible speech.")
 
@@ -361,12 +468,19 @@ if uploaded_file is not None:
                         for number, clip in enumerate(clips, 1):
                             output_path = folder / f"clip_{number}_vertical.mp4"
                             subtitle_path = folder / f"clip_{number}.srt"
+                            ass_path = folder / f"clip_{number}_word_highlight.ass"
                             clip_length = clip["end"] - clip["start"]
                             has_subtitles = write_clip_subtitles(
                                 segments,
                                 clip["start"],
                                 clip["end"],
                                 subtitle_path,
+                            )
+                            has_word_captions = write_word_highlight_ass(
+                                word_timestamps,
+                                clip["start"],
+                                clip["end"],
+                                ass_path,
                             )
 
                             # Fast 9:16 export. One scale/crop (or scale/pad) pass is
@@ -383,16 +497,24 @@ if uploaded_file is not None:
                                     f"fps={OUTPUT_FPS}"
                                 )
 
-                            if burn_captions and has_subtitles:
-                                style = (
-                                    "FontName=DejaVu Sans,FontSize=30,"
-                                    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-                                    "BorderStyle=1,Outline=2,Shadow=1,"
-                                    "Alignment=2,MarginV=85"
-                                )
-                                video_filter += (
-                                    f",subtitles={subtitle_path.as_posix()}:force_style='{style}'"
-                                )
+                            caption_path = ass_path if has_word_captions else subtitle_path
+                            if burn_captions and (has_word_captions or has_subtitles):
+                                # ASS word captions use 28px text, a safe lower-third
+                                # position, and a moving yellow highlight on the spoken word.
+                                if has_word_captions:
+                                    caption_file = ass_path.as_posix().replace(":", r"\:")
+                                    video_filter += f",subtitles='{caption_file}'"
+                                else:
+                                    style = (
+                                        "FontName=DejaVu Sans,FontSize=28,"
+                                        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+                                        "BorderStyle=1,Outline=2,Shadow=1,"
+                                        "Alignment=2,MarginV=175"
+                                    )
+                                    caption_file = subtitle_path.as_posix().replace(":", r"\:")
+                                    video_filter += (
+                                        f",subtitles='{caption_file}':force_style='{style}'"
+                                    )
 
                             with st.spinner(f"Creating fast vertical clip {number} of {len(clips)}..."):
                                 encode_args = [
@@ -413,15 +535,14 @@ if uploaded_file is not None:
                                 except RuntimeError:
                                     # If subtitle rendering is unavailable, retry without
                                     # burned captions; the separate SRT remains downloadable.
-                                    if burn_captions and has_subtitles:
+                                    if burn_captions and (has_word_captions or has_subtitles):
                                         output_path.unlink(missing_ok=True)
                                         st.warning(
                                             "Could not burn captions into this MP4 on the current server. "
-                                            "The vertical clip will still be created, and you can download its SRT file."
+                                            "The vertical clip will still be created, and the SRT subtitle file will be available."
                                         )
-                                        encode_args[encode_args.index(video_filter)] = (
-                                            video_filter.rsplit(",subtitles=", 1)[0]
-                                        )
+                                        clean_filter = video_filter.split(",subtitles=", 1)[0]
+                                        encode_args[encode_args.index(video_filter)] = clean_filter
                                         run_command(encode_args, timeout=240)
                                     else:
                                         raise
@@ -443,27 +564,34 @@ if uploaded_file is not None:
 
                     st.balloons()
                     st.success(f"Done! {len(generated)} clips created successfully.")
+                    # Two-column result grid keeps portrait previews compact instead
+                    # of stretching each generated video across the entire page.
+                    result_columns = st.columns(2)
                     for number, clip in enumerate(generated, 1):
-                        st.divider()
-                        st.subheader(f"🎬 Clip {number}: {clip['title']}")
-                        st.write(clip["reason"])
-                        st.caption(f"{clip['start']:.1f}s to {clip['end']:.1f}s")
-                        st.video(clip["data"])
-                        st.download_button(
-                            f"⬇️ Download Clip {number}",
-                            data=clip["data"],
-                            file_name=f"ClipAI_{number}.mp4",
-                            mime="video/mp4",
-                            key=f"download_clip_{number}",
-                        )
-                        if clip["srt"]:
+                        with result_columns[(number - 1) % 2]:
+                            st.divider()
+                            st.subheader(f"🎬 Clip {number}: {clip['title']}")
+                            st.caption(f"{clip['start']:.1f}s to {clip['end']:.1f}s")
+                            with st.expander("Preview clip", expanded=True):
+                                st.video(clip["data"], width=240)
+                                st.caption(clip["reason"])
                             st.download_button(
-                                f"💬 Download subtitles {number} (.srt)",
-                                data=clip["srt"],
-                                file_name=f"ClipAI_{number}_subtitles.srt",
-                                mime="application/x-subrip",
-                                key=f"download_srt_{number}",
+                                f"⬇️ Download Clip {number}",
+                                data=clip["data"],
+                                file_name=f"ClipAI_{number}.mp4",
+                                mime="video/mp4",
+                                key=f"download_clip_{number}",
+                                use_container_width=True,
                             )
+                            if clip["srt"]:
+                                st.download_button(
+                                    f"💬 Download subtitles {number} (.srt)",
+                                    data=clip["srt"],
+                                    file_name=f"ClipAI_{number}_subtitles.srt",
+                                    mime="application/x-subrip",
+                                    key=f"download_srt_{number}",
+                                    use_container_width=True,
+                                )
 
                     with st.expander("View the transcript"):
                         st.text_area("Transcript", transcript, height=220)
