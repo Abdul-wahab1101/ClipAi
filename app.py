@@ -1,3 +1,4 @@
+import hashlib
 import ipaddress
 import json
 import re
@@ -5,7 +6,6 @@ import shutil
 import socket
 import subprocess
 import tempfile
-import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -23,8 +23,8 @@ MAX_CLIPS_PER_VIDEO = 5  # User can choose 2-5 clips; keep beta workload control
 OUTPUT_WIDTH = 720
 OUTPUT_HEIGHT = 1280
 OUTPUT_FPS = 24
-MAX_JOBS_PER_SESSION_PER_DAY = 2
-MAX_JOBS_TOTAL_PER_APP_PER_DAY = 5
+MAX_JOBS_PER_USER_PER_DAY = 2
+MAX_JOBS_TOTAL_PER_APP_PER_DAY = 5  # Keep this beta cap until public launch tests pass.
 
 st.set_page_config(
     page_title="ClipAI - AI Video Clipper",
@@ -33,42 +33,235 @@ st.set_page_config(
 )
 
 
-# ---------------- SHARED IN-MEMORY DAILY COUNTER ----------------
-class UsageGuard:
-    """A temporary app-wide counter shared by sessions in this process."""
-
-    def __init__(self):
-        self.day = datetime.now(timezone.utc).date().isoformat()
-        self.jobs = 0
-        self.lock = threading.Lock()
-
-    def reserve_job(self):
-        today = datetime.now(timezone.utc).date().isoformat()
-        with self.lock:
-            if today != self.day:
-                self.day = today
-                self.jobs = 0
-            if self.jobs >= MAX_JOBS_TOTAL_PER_APP_PER_DAY:
-                return False, self.jobs
-            self.jobs += 1
-            return True, self.jobs
-
-    def get_usage(self):
-        today = datetime.now(timezone.utc).date().isoformat()
-        with self.lock:
-            if today != self.day:
-                self.day = today
-                self.jobs = 0
-            return self.jobs
+# ---------------- GOOGLE SIGN-IN + PERSISTENT SUPABASE QUOTAS ----------------
+SUPABASE_URL = str(st.secrets.get("SUPABASE_URL", "")).rstrip("/")
+SUPABASE_SECRET_KEY = str(st.secrets.get("SUPABASE_SECRET_KEY", ""))
+CONTACT_EMAIL = str(st.secrets.get("CONTACT_EMAIL", "")).strip()
 
 
-@st.cache_resource
-def get_usage_guard():
-    return UsageGuard()
+def supabase_rpc(function_name, payload):
+    """Call a Supabase Postgres function from this server-side Streamlit app."""
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+        raise RuntimeError("Supabase is not configured. Check Streamlit Secrets.")
+
+    url = f"{SUPABASE_URL}/rest/v1/rpc/{function_name}"
+    headers = {
+        "apikey": SUPABASE_SECRET_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    # New sb_secret keys are API keys, not JWTs, so they must not be sent as Bearer tokens.
+    # The legacy service_role JWT remains supported as a compatibility option.
+    if SUPABASE_SECRET_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {SUPABASE_SECRET_KEY}"
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(
+            f"Usage database returned HTTP {exc.code}. Check the Supabase SQL setup and Secret key. {detail}"
+        ) from None
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError("Could not reach the usage database. Please try again later.") from exc
 
 
-guard = get_usage_guard()
+def get_daily_usage(user_id, usage_date):
+    result = supabase_rpc(
+        "get_clipai_usage",
+        {"p_user_id": user_id, "p_usage_date": usage_date},
+    )
+    row = result[0] if isinstance(result, list) and result else result
+    if not isinstance(row, dict):
+        raise RuntimeError("The usage database returned an unexpected response.")
+    return {
+        "user_jobs": int(row.get("user_jobs", 0)),
+        "app_jobs": int(row.get("app_jobs", 0)),
+    }
 
+
+def reserve_daily_job(user_id, usage_date):
+    result = supabase_rpc(
+        "reserve_clipai_job",
+        {
+            "p_user_id": user_id,
+            "p_usage_date": usage_date,
+            "p_user_limit": MAX_JOBS_PER_USER_PER_DAY,
+            "p_app_limit": MAX_JOBS_TOTAL_PER_APP_PER_DAY,
+        },
+    )
+    row = result[0] if isinstance(result, list) and result else result
+    if not isinstance(row, dict):
+        raise RuntimeError("The usage database returned an unexpected reservation response.")
+    return {
+        "allowed": bool(row.get("allowed", False)),
+        "user_jobs": int(row.get("user_jobs", 0)),
+        "app_jobs": int(row.get("app_jobs", 0)),
+        "reason": str(row.get("reason", "unknown")),
+    }
+
+
+def render_policy_page(page_name):
+    """Render public policy pages without asking visitors to sign in first."""
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"] {background:#0b0d14;}
+        [data-testid="stMainBlockContainer"] {max-width:900px;padding-top:2rem;padding-bottom:3rem;}
+        h1,h2,h3 {letter-spacing:-.025em;}
+        .policy-note {color:#b9c2d2;background:#151d2c;border:1px solid #30394a;padding:13px 16px;border-radius:12px;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("🎬 **ClipAI** · Beta service")
+    if page_name == "Privacy Policy":
+        st.title("Privacy Policy")
+        st.caption("Effective date: 5 November 2026")
+        st.markdown("""
+### 1. Information ClipAI handles
+When you sign in, Google provides an account identifier and basic profile information such as your name and email. ClipAI uses the Google subject identifier to create a one-way SHA-256 pseudonymous ID for quota records. The quota database stores that pseudonymous ID, the UTC usage date, and the number of jobs used; it does not store your raw Google subject, email, video, transcript, or generated clips.
+
+When you use the service, ClipAI temporarily handles the video file you upload or the direct HTTPS media URL you submit, plus extracted audio and the transcript needed to create clips. The current beta does not provide a permanent media library. Temporary processing files are created while a job runs, and results are provided in the active app session for download.
+
+### 2. How third-party services are involved
+- **Google:** authenticates your account through OpenID Connect. Streamlit uses an authentication cookie so you can remain signed in; you can sign out from the app sidebar.
+- **Groq:** receives extracted audio for transcription and transcript text for clip selection. Groq says inference inputs and outputs are not retained by default, but limited reliability or abuse-monitoring logs may retain data for up to 30 days unless Zero Data Retention is enabled. Review [Groq's data documentation](https://console.groq.com/docs/your-data).
+- **Supabase:** stores the pseudonymous daily usage counters described above. Its free project may pause after a period of inactivity; database availability can therefore affect quota checks.
+- **Streamlit Community Cloud:** hosts the app and handles app sessions and uploaded files while you use it.
+
+Each provider processes information under its own terms and privacy documents. Do not upload confidential, highly sensitive, or private material in this beta.
+
+### 3. Why information is used
+Information is used only to authenticate users, operate the video-clipping workflow, enforce daily usage limits, protect the service from abuse, and troubleshoot errors.
+
+### 4. Retention
+Daily quota records are kept in the ClipAI database while needed to operate and protect the beta. Source videos, extracted audio, transcripts, and generated clips are not written to the quota tables. The app is not a long-term file-hosting or backup service.
+
+### 5. Your responsibilities and choices
+Only upload videos you own or are authorized to edit and submit to AI services. You can stop using ClipAI and sign out at any time. For a privacy or quota-record deletion request, contact the site operator using the contact details shown below.
+
+### 6. Contact
+""")
+        if CONTACT_EMAIL:
+            st.markdown(f"Privacy questions: **[{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})**")
+        else:
+            st.warning("The site owner must add CONTACT_EMAIL in Streamlit Secrets before public launch.")
+        st.caption("This is a beta policy draft, not legal advice. The operator should review it for the laws and regions where ClipAI will be offered before public launch.")
+    else:
+        st.title("Terms of Service")
+        st.caption("Effective date: 5 November 2026")
+        st.markdown("""
+### 1. Beta service
+ClipAI is an experimental video-clipping service. Features, processing capacity, availability, and daily limits may change while the service is tested. Jobs can fail because of file formats, video quality, provider limits, or hosting constraints.
+
+### 2. Your content and permission
+You must own the video or have permission and all necessary rights to upload it, provide a media link, transcribe it, edit it, and create derivative clips. You are responsible for complying with copyright law and the terms of YouTube, TikTok, Instagram, and any other platform you use. ClipAI does not authorize downloading or copying videos from third-party platforms.
+
+### 3. Acceptable use
+Do not use ClipAI to infringe copyright or privacy rights, distribute unlawful content, bypass platform restrictions, attack the service, overload the service, or evade usage limits. Do not share your account or attempt to bypass per-user quotas with multiple accounts.
+
+### 4. AI output
+AI-selected moments, transcripts, captions, titles, and clip boundaries can be inaccurate. You must review each result before publishing. ClipAI does not guarantee views, virality, engagement, revenue, or fitness for a particular purpose.
+
+### 5. Limits and availability
+The beta currently allows up to 2 processing jobs per signed-in account per UTC day and 5 jobs across the entire app per UTC day. A job is counted when processing is reserved, even if the job later fails. Limits may be adjusted to protect free-tier provider and hosting capacity. No paid service or unlimited processing is promised.
+
+### 6. Third-party services
+ClipAI relies on Google sign-in, Groq AI services, Supabase database services, and Streamlit hosting. Those services may be unavailable or subject to their own terms and limits.
+
+### 7. Changes and suspension
+The operator may change, pause, or discontinue this beta to protect the service, comply with law, or respond to provider restrictions. Continued use after an updated version is posted means you accept the updated terms.
+
+### 8. Contact
+""")
+        if CONTACT_EMAIL:
+            st.markdown(f"Terms questions: **[{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})**")
+        else:
+            st.warning("The site owner must add CONTACT_EMAIL in Streamlit Secrets before public launch.")
+        st.caption("This is a beta terms draft, not legal advice. Have it reviewed for the laws and regions where ClipAI will be offered before public launch.")
+
+
+# Public policy pages are available even before sign-in.
+page_selection = st.sidebar.radio(
+    "ClipAI menu",
+    ["Create clips", "Privacy Policy", "Terms of Service"],
+    index=0,
+)
+if page_selection != "Create clips":
+    render_policy_page(page_selection)
+    st.stop()
+
+# Require both Google OIDC and the durable usage database before processing is enabled.
+_auth_settings = st.secrets.get("auth", {})
+_google_settings = _auth_settings.get("google", {}) if hasattr(_auth_settings, "get") else {}
+_required_auth_values = (
+    _auth_settings.get("redirect_uri", "") if hasattr(_auth_settings, "get") else "",
+    _auth_settings.get("cookie_secret", "") if hasattr(_auth_settings, "get") else "",
+    _google_settings.get("client_id", "") if hasattr(_google_settings, "get") else "",
+    _google_settings.get("client_secret", "") if hasattr(_google_settings, "get") else "",
+)
+if not all(_required_auth_values) or not _google_settings:
+    st.title("ClipAI account setup")
+    st.warning("Google sign-in is not configured yet. The owner must finish the Google OAuth setup in Streamlit Secrets before users can process videos.")
+    st.markdown("1. Create a Google OAuth **Web application** client.\n2. Add your Streamlit app's `/oauth2callback` URL as an authorized redirect URI.\n3. Add the `[auth]` and `[auth.google]` entries from the setup guide to Streamlit Secrets.")
+    st.stop()
+
+if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+    st.title("ClipAI database setup")
+    st.warning("The durable usage database is not configured yet. Add SUPABASE_URL and SUPABASE_SECRET_KEY to Streamlit Secrets.")
+    st.stop()
+
+try:
+    signed_in = bool(st.user.is_logged_in)
+except Exception:
+    signed_in = False
+
+if not signed_in:
+    st.title("Welcome to ClipAI")
+    st.markdown("Sign in with Google to create clips and keep your daily usage linked to your account.")
+    st.button("Continue with Google", on_click=st.login, args=["google"], type="primary")
+    st.caption("Your videos are not saved as a permanent library by this beta. Read the Privacy Policy and Terms of Service from the sidebar before continuing.")
+    st.stop()
+
+try:
+    _google_subject = str(st.user.get("sub", "")).strip()
+    _google_email = str(st.user.get("email", "")).strip()
+    _display_name = str(st.user.get("name", "Creator")).strip() or "Creator"
+except Exception:
+    _google_subject, _google_email, _display_name = "", "", "Creator"
+
+if not _google_subject:
+    st.error("Google did not provide a stable account identifier. Please sign out and sign in again.")
+    st.stop()
+
+# Store only a pseudonymous hash of Google's stable subject identifier in Supabase.
+CURRENT_USER_ID = hashlib.sha256(
+    ("clipai-quota-v1:" + _google_subject).encode("utf-8")
+).hexdigest()
+CURRENT_UTC_DAY = datetime.now(timezone.utc).date().isoformat()
+
+st.sidebar.success(f"Signed in as {_display_name}")
+if _google_email:
+    st.sidebar.caption(_google_email)
+if st.sidebar.button("Log out"):
+    st.logout()
+st.sidebar.caption("Beta quota: 2 jobs per account per day; 5 jobs shared across ClipAI per day (UTC).")
+
+try:
+    CURRENT_USAGE = get_daily_usage(CURRENT_USER_ID, CURRENT_UTC_DAY)
+except Exception as usage_error:
+    st.error("ClipAI cannot verify your daily quota, so processing is temporarily disabled to protect the AI key.")
+    st.caption(str(usage_error)[:500])
+    st.stop()
 
 def get_value(item, key, default=None):
     """Read Groq response fields from either dicts or SDK objects."""
@@ -650,18 +843,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-used_today = guard.get_usage()
-current_day = datetime.now(timezone.utc).date().isoformat()
-if st.session_state.get("clipai_session_day") != current_day:
-    st.session_state["clipai_session_day"] = current_day
-    st.session_state["clipai_session_jobs"] = 0
-session_jobs = st.session_state.get("clipai_session_jobs", 0)
+user_jobs = CURRENT_USAGE["user_jobs"]
+used_today = CURRENT_USAGE["app_jobs"]
 
 usage_col1, usage_col2 = st.columns(2)
 with usage_col1:
-    st.caption(f"Shared beta usage today: {used_today}/{MAX_JOBS_TOTAL_PER_APP_PER_DAY} jobs (UTC reset).")
+    st.caption(f"Your account usage today: {user_jobs}/{MAX_JOBS_PER_USER_PER_DAY} jobs (UTC reset).")
 with usage_col2:
-    st.caption(f"This browser session: {session_jobs}/{MAX_JOBS_PER_SESSION_PER_DAY} jobs used today.")
+    st.caption(f"Shared beta usage today: {used_today}/{MAX_JOBS_TOTAL_PER_APP_PER_DAY} jobs (UTC reset).")
 
 st.divider()
 st.markdown('<div class="clipai-section-kicker">Create clips</div><div class="clipai-section-title">Upload a file or use a loaded direct link</div>', unsafe_allow_html=True)
@@ -686,21 +875,29 @@ if uploaded_file is not None:
 
     if file_size_mb > MAX_UPLOAD_MB:
         st.error(f"Please upload a file smaller than {MAX_UPLOAD_MB} MB.")
-    elif session_jobs >= MAX_JOBS_PER_SESSION_PER_DAY:
-        st.warning("You have used this browser session's daily beta limit. Please try after the daily reset.")
+    elif user_jobs >= MAX_JOBS_PER_USER_PER_DAY:
+        st.warning("You have used your account's daily beta limit. Please try after the daily reset (UTC).")
     elif used_today >= MAX_JOBS_TOTAL_PER_APP_PER_DAY:
         st.warning("ClipAI has reached today's shared beta limit. Please try after the daily reset.")
     else:
         if st.button("✨ Generate AI Clips", type="primary"):
-            # Reserve a shared app slot before any API request, to avoid repeated clicks.
-            allowed, total_used = guard.reserve_job()
-            if not allowed:
-                st.warning("ClipAI has reached today's shared beta limit. Please try after the daily reset.")
+            # Atomically reserve a durable per-account and app-wide quota slot.
+            try:
+                reservation = reserve_daily_job(CURRENT_USER_ID, CURRENT_UTC_DAY)
+            except Exception as quota_error:
+                st.error("ClipAI could not reserve a quota slot. No AI processing was started.")
+                st.caption(str(quota_error)[:500])
+                st.stop()
+
+            if not reservation["allowed"]:
+                if reservation["reason"] == "user_limit":
+                    st.warning("You have used your account's daily limit. Please try after the UTC reset.")
+                else:
+                    st.warning("ClipAI has reached its shared beta limit for today. Please try after the UTC reset.")
             else:
-                st.session_state["clipai_session_jobs"] = session_jobs + 1
                 st.caption(
-                    f"This attempt is counted. Shared beta usage: "
-                    f"{total_used}/{MAX_JOBS_TOTAL_PER_APP_PER_DAY}."
+                    f"This attempt is counted. Your usage: {reservation['user_jobs']}/{MAX_JOBS_PER_USER_PER_DAY}; "
+                    f"shared usage: {reservation['app_jobs']}/{MAX_JOBS_TOTAL_PER_APP_PER_DAY}."
                 )
 
                 try:
@@ -1003,7 +1200,7 @@ st.markdown(
     </div>
     <div class="clipai-footer">
       <span>© 2026 ClipAI · Free beta. Features and limits may change during testing.</span>
-      <span><a href="#top">Back to top ↑</a> · Please upload content you own or are authorized to use.</span>
+      <span><a href="#top">Back to top ↑</a> · Privacy Policy and Terms are in the sidebar · Upload authorized content only.</span>
     </div>
     """,
     unsafe_allow_html=True,
