@@ -17,9 +17,10 @@ import streamlit as st
 from groq import Groq
 
 # ---------------- SETTINGS: conservative beta limits ----------------
-MAX_UPLOAD_MB = 50
-MAX_VIDEO_SECONDS = 300          # 5 minutes per video
-MAX_AUDIO_MB = 24                # keep below Groq's documented 25 MB limit
+MAX_UPLOAD_MB = 150              # Keep below Streamlit Community Cloud's default per-file cap.
+MAX_VIDEO_SECONDS = 1800         # 30 minutes per video in this beta.
+MAX_AUDIO_MB = 24                # Keep below Groq's documented 25 MB free-tier audio limit.
+MAX_TRANSCRIPT_CHARS_FOR_AI = 24000  # Keep model input manageable on the free tier.
 MAX_CLIPS_PER_VIDEO = 5  # User can choose 2-5 clips; keep beta workload controlled.
 OUTPUT_WIDTH = 720
 OUTPUT_HEIGHT = 1280
@@ -177,7 +178,7 @@ Do not use ClipAI to infringe copyright or privacy rights, distribute unlawful c
 AI-selected moments, transcripts, captions, titles, and clip boundaries can be inaccurate. You must review each result before publishing. ClipAI does not guarantee views, virality, engagement, revenue, or fitness for a particular purpose.
 
 ### 5. Limits and availability
-The beta currently allows up to 2 processing jobs per signed-in account per UTC day and 5 jobs across the entire app per UTC day. A job is counted when processing is reserved, even if the job later fails. Limits may be adjusted to protect free-tier provider and hosting capacity. No paid service or unlimited processing is promised.
+The beta currently accepts videos up to 30 minutes and 150 MB, and allows up to 2 processing jobs per signed-in account per UTC day and 5 jobs across the entire app per UTC day. A job is counted when processing is reserved, even if the job later fails. Limits may be adjusted to protect free-tier provider and hosting capacity. No paid service or unlimited processing is promised.
 
 ### 6. Third-party services
 ClipAI relies on Google sign-in, Groq AI services, Supabase database services, and Streamlit hosting. Those services may be unavailable or subject to their own terms and limits.
@@ -665,62 +666,98 @@ def validate_suggestions(data, duration, requested_clip_count):
 st.markdown(
     """
     <style>
-    :root { --clip-bg:#0b0d14; --clip-panel:#121725; --clip-panel-2:#171e2d;
-            --clip-line:rgba(255,255,255,.10); --clip-muted:#aab3c5;
-            --clip-accent:#9b8cff; --clip-accent-2:#65d6c4; }
-    [data-testid="stAppViewContainer"] { background:var(--clip-bg); }
-    [data-testid="stHeader"] { background:rgba(11,13,20,.86); }
-    [data-testid="stMainBlockContainer"] { max-width:1160px; padding-top:1.25rem; padding-bottom:3rem; }
-    h1,h2,h3 { letter-spacing:-.035em; }
-    .clipai-nav { display:flex; align-items:center; justify-content:space-between; gap:18px;
-        padding:12px 0 22px; border-bottom:1px solid var(--clip-line); margin-bottom:30px; }
-    .clipai-brand { color:#fff !important; text-decoration:none !important; font-size:1.34rem;
-        font-weight:800; letter-spacing:-.04em; }
-    .clipai-brand span { color:var(--clip-accent); }
-    .clipai-navlinks { display:flex; gap:22px; flex-wrap:wrap; }
-    .clipai-navlinks a { color:#c6cede !important; text-decoration:none !important; font-size:.88rem; }
+    :root {
+      --clip-bg:#090d18; --clip-panel:#111827; --clip-panel-2:#172235;
+      --clip-line:rgba(207,220,255,.13); --clip-muted:#a7b3c8;
+      --clip-accent:#a78bfa; --clip-accent-2:#5eead4; --clip-text:#f6f7fb;
+    }
+    html { scroll-behavior:smooth; }
+    [data-testid="stAppViewContainer"] {
+      background:
+        radial-gradient(ellipse at 12% 0%,rgba(109,84,220,.20),transparent 34%),
+        radial-gradient(ellipse at 92% 18%,rgba(40,183,174,.12),transparent 30%),
+        linear-gradient(180deg,#0a0e19 0%,#0b1020 48%,#090d18 100%);
+      color:var(--clip-text);
+    }
+    [data-testid="stHeader"] { background:rgba(9,13,24,.72); }
+    [data-testid="stMainBlockContainer"] { max-width:1120px; padding:1.2rem 2rem 3.5rem; }
+    [data-testid="stSidebar"] { background:linear-gradient(180deg,#101729,#0d1422); border-right:1px solid var(--clip-line); }
+    h1,h2,h3 { letter-spacing:-.04em; color:#f7f8fc; }
+    p,li { color:#c4ccda; }
+    .clipai-nav {
+      display:flex; align-items:center; justify-content:space-between; gap:18px;
+      padding:13px 2px 21px; border-bottom:1px solid var(--clip-line); margin-bottom:27px;
+    }
+    .clipai-brand { color:#fff !important; text-decoration:none !important; font-size:1.52rem;
+      font-weight:850; letter-spacing:-.055em; }
+    .clipai-brand span { background:linear-gradient(90deg,#b8a5ff,#67e8d4); -webkit-background-clip:text; background-clip:text; color:transparent; }
+    .clipai-navlinks { display:flex; align-items:center; gap:25px; flex-wrap:wrap; }
+    .clipai-navlinks a { color:#c6d0e1 !important; text-decoration:none !important; font-size:.88rem; font-weight:600; transition:color .2s ease; }
     .clipai-navlinks a:hover { color:#fff !important; }
-    .clipai-pill { border:1px solid rgba(155,140,255,.35); color:#c9c0ff; background:rgba(155,140,255,.10);
-        border-radius:999px; padding:6px 11px; font-size:.75rem; white-space:nowrap; }
-    .clipai-hero { display:grid; grid-template-columns:1.35fr .85fr; gap:25px; align-items:center;
-        padding:30px; border:1px solid var(--clip-line); border-radius:22px;
-        background:radial-gradient(ellipse at 85% 5%,rgba(155,140,255,.18),transparent 42%),
-                   radial-gradient(ellipse at 5% 95%,rgba(101,214,196,.10),transparent 38%),#111624;
-        margin-bottom:26px; }
-    .clipai-eyebrow { color:#bdb2ff; text-transform:uppercase; letter-spacing:.13em; font-size:.72rem; font-weight:800; }
-    .clipai-hero h1 { color:#fff; font-size:clamp(2.1rem,5vw,3.65rem); line-height:1.04; margin:.65rem 0 .8rem; }
-    .clipai-hero h1 span { background:linear-gradient(90deg,#b7aaff,#71dfd0); -webkit-background-clip:text; background-clip:text; color:transparent; }
-    .clipai-hero p { color:#b9c2d2; font-size:1.02rem; line-height:1.65; max-width:650px; margin-bottom:0; }
-    .clipai-hero-card { border:1px solid rgba(255,255,255,.12); border-radius:17px; padding:19px;
-        background:rgba(8,11,19,.55); }
-    .clipai-mini-label { color:#95a0b5; text-transform:uppercase; font-size:.68rem; letter-spacing:.12em; }
-    .clipai-mini-title { color:#fff; font-weight:750; font-size:1.18rem; margin:7px 0 5px; }
-    .clipai-mini-copy { color:#aeb8c9; font-size:.82rem; line-height:1.5; }
-    .clipai-statrow { display:flex; gap:9px; flex-wrap:wrap; margin-top:17px; }
-    .clipai-stat { border:1px solid var(--clip-line); background:rgba(255,255,255,.045); border-radius:10px;
-        padding:9px 11px; color:#d7dced; font-size:.78rem; }
-    .clipai-section-kicker { color:#a99cff; font-size:.72rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
-    .clipai-section-title { color:#fff; font-weight:800; font-size:1.65rem; letter-spacing:-.04em; margin:4px 0 5px; }
-    .clipai-section-copy { color:var(--clip-muted); font-size:.91rem; margin-bottom:14px; }
-    .clipai-feature-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:13px; margin:12px 0 26px; }
-    .clipai-feature { background:var(--clip-panel); border:1px solid var(--clip-line); border-radius:15px; padding:17px; }
-    .clipai-feature-icon { font-size:1.35rem; margin-bottom:9px; }
-    .clipai-feature-title { color:#f4f5fa; font-weight:750; margin-bottom:5px; }
-    .clipai-feature-copy { color:#aab3c5; font-size:.82rem; line-height:1.5; }
-    .clipai-limit { color:#c9d5e8; background:rgba(101,214,196,.08); border:1px solid rgba(101,214,196,.2);
-        border-radius:12px; padding:12px 15px; font-size:.83rem; margin:12px 0; }
-    .clipai-footer { border-top:1px solid var(--clip-line); padding-top:18px; margin-top:28px;
-        color:#919caf; font-size:.78rem; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-    .clipai-footer a { color:#c7bdff !important; text-decoration:none !important; }
-    div[data-testid="stFileUploader"] section { border-radius:14px; }
-    div[data-testid="stButton"] button[kind="primary"] { border-radius:11px; font-weight:750; }
+    .clipai-pill { border:1px solid rgba(167,139,250,.40); color:#d5caff; background:rgba(167,139,250,.12);
+      border-radius:999px; padding:7px 12px; font-size:.72rem; font-weight:800; letter-spacing:.07em; white-space:nowrap; }
+    .clipai-hero {
+      display:grid; grid-template-columns:1.28fr .82fr; gap:30px; align-items:center;
+      padding:clamp(24px,4vw,42px); border:1px solid rgba(210,220,255,.15); border-radius:27px;
+      background:radial-gradient(ellipse at 82% 0%,rgba(167,139,250,.24),transparent 43%),
+                 radial-gradient(ellipse at 2% 100%,rgba(94,234,212,.12),transparent 42%),
+                 linear-gradient(135deg,rgba(24,34,57,.98),rgba(13,19,33,.98));
+      box-shadow:0 24px 70px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.045);
+      margin-bottom:35px; position:relative; overflow:hidden;
+    }
+    .clipai-eyebrow { color:#c8baff; text-transform:uppercase; letter-spacing:.16em; font-size:.70rem; font-weight:850; }
+    .clipai-hero h1 { color:#fff; font-size:clamp(2.35rem,5.1vw,4.05rem); line-height:1.02; margin:.72rem 0 .95rem; font-weight:850; }
+    .clipai-hero h1 span { background:linear-gradient(95deg,#c5b8ff 8%,#73ead8 95%); -webkit-background-clip:text; background-clip:text; color:transparent; }
+    .clipai-hero p { color:#b9c5d8; font-size:1.02rem; line-height:1.72; max-width:630px; margin-bottom:0; }
+    .clipai-hero-card { border:1px solid rgba(220,228,255,.16); border-radius:20px; padding:22px;
+      background:linear-gradient(150deg,rgba(8,13,25,.77),rgba(21,29,48,.72)); box-shadow:0 14px 36px rgba(0,0,0,.18); }
+    .clipai-mini-label { color:#91a0ba; text-transform:uppercase; font-size:.68rem; letter-spacing:.14em; font-weight:800; }
+    .clipai-mini-title { color:#fff; font-weight:800; font-size:1.22rem; margin:9px 0 7px; letter-spacing:-.025em; }
+    .clipai-mini-copy { color:#b0bdd1; font-size:.84rem; line-height:1.62; }
+    .clipai-statrow { display:flex; gap:9px; flex-wrap:wrap; margin-top:19px; }
+    .clipai-stat { border:1px solid rgba(220,228,255,.13); background:rgba(255,255,255,.055); border-radius:11px;
+      padding:9px 12px; color:#e0e7f5; font-size:.78rem; font-weight:650; }
+    .clipai-section-kicker { color:#b7a6ff; font-size:.70rem; font-weight:850; letter-spacing:.16em; text-transform:uppercase; }
+    .clipai-section-title { color:#fff; font-weight:850; font-size:1.8rem; letter-spacing:-.05em; margin:5px 0 5px; }
+    .clipai-section-copy { color:var(--clip-muted); font-size:.92rem; line-height:1.55; margin-bottom:17px; }
+    .clipai-feature-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:15px; margin:14px 0 31px; }
+    .clipai-feature { background:linear-gradient(145deg,#141e30,#101827); border:1px solid var(--clip-line); border-radius:17px; padding:19px;
+      box-shadow:0 10px 28px rgba(0,0,0,.12); transition:transform .18s ease,border-color .18s ease; }
+    .clipai-feature:hover { transform:translateY(-3px); border-color:rgba(167,139,250,.42); }
+    .clipai-feature-icon { font-size:1.45rem; margin-bottom:11px; }
+    .clipai-feature-title { color:#f5f7fc; font-weight:800; margin-bottom:6px; }
+    .clipai-feature-copy { color:#aebbd0; font-size:.83rem; line-height:1.58; }
+    .clipai-limit { color:#d1e9e6; background:linear-gradient(100deg,rgba(94,234,212,.09),rgba(167,139,250,.08));
+      border:1px solid rgba(94,234,212,.22); border-radius:13px; padding:13px 16px; font-size:.84rem; margin:15px 0; }
+    .clipai-footer { border-top:1px solid var(--clip-line); padding-top:20px; margin-top:33px;
+      color:#94a3b8; font-size:.79rem; display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+    .clipai-footer a { color:#c7bdff !important; text-decoration:none !important; font-weight:650; }
+    .clipai-footer a:hover { color:#fff !important; }
+    div[data-testid="stFileUploader"] section { background:rgba(20,29,47,.72); border:1px dashed rgba(167,139,250,.45); border-radius:17px; padding:18px; }
+    div[data-testid="stFileUploader"] section:hover { border-color:#75e4d5; }
+    div[data-testid="stTextInput"] input,div[data-testid="stTextArea"] textarea {
+      background:#111a2a; color:#f4f6fb; border:1px solid rgba(190,205,235,.18); border-radius:11px;
+    }
+    div[data-testid="stTextInput"] input:focus,div[data-testid="stTextArea"] textarea:focus { border-color:#a78bfa; box-shadow:0 0 0 1px #a78bfa; }
+    div[data-testid="stButton"] button,div[data-testid="stDownloadButton"] button {
+      border-radius:12px; border:1px solid rgba(190,205,235,.18); font-weight:750; min-height:2.7rem; transition:all .18s ease;
+    }
+    div[data-testid="stButton"] button[kind="primary"] { color:#111326; background:linear-gradient(100deg,#b7a5ff,#71e5d5); border:0; box-shadow:0 8px 24px rgba(117,105,220,.24); }
+    div[data-testid="stButton"] button:hover,div[data-testid="stDownloadButton"] button:hover { border-color:#9b8cff; transform:translateY(-1px); }
+    div[data-testid="stAlert"] { border-radius:13px; }
+    div[data-testid="stExpander"] { background:rgba(17,26,42,.72); border:1px solid var(--clip-line); border-radius:14px; }
+    div[data-testid="stRadio"] label,div[data-testid="stCheckbox"] label { color:#d8e0ef; }
+    div[data-testid="stVideo"] { border-radius:14px; overflow:hidden; }
+    .stCaption { color:#91a0b8; }
     @media (max-width:760px) {
-      [data-testid="stMainBlockContainer"] { padding-left:1rem; padding-right:1rem; }
-      .clipai-nav { align-items:flex-start; flex-direction:column; }
-      .clipai-navlinks { gap:14px; }
-      .clipai-hero { grid-template-columns:1fr; padding:22px; }
+      [data-testid="stMainBlockContainer"] { padding:1rem 1rem 2.4rem; }
+      .clipai-nav { align-items:flex-start; flex-direction:column; padding-bottom:16px; margin-bottom:20px; }
+      .clipai-navlinks { gap:13px; }
+      .clipai-hero { grid-template-columns:1fr; gap:20px; padding:23px 19px; border-radius:21px; }
       .clipai-hero h1 { font-size:2.35rem; }
       .clipai-feature-grid { grid-template-columns:1fr; }
+      .clipai-statrow { gap:7px; }
+      .clipai-stat { font-size:.74rem; }
     }
     </style>
     """,
@@ -742,23 +779,23 @@ st.markdown(
       <div>
         <div class="clipai-eyebrow">AI short-form video studio</div>
         <h1>One long video.<br><span>More moments worth sharing.</span></h1>
-        <p>ClipAI finds engaging moments in your video and turns them into vertical shorts with optional word-highlight captions—ready for your next post.</p>
+        <p>ClipAI reviews your long video, finds distinct moments worth sharing, and turns them into vertical shorts with optional word-highlight captions.</p>
         <div class="clipai-statrow">
-          <span class="clipai-stat">✂️ AI moment selection</span>
+          <span class="clipai-stat">✂️ 2–5 distinct clips</span>
           <span class="clipai-stat">📱 Vertical 9:16 exports</span>
-          <span class="clipai-stat">💬 Captions option</span>
+          <span class="clipai-stat">⏱️ Up to 30 minutes (beta)</span>
         </div>
       </div>
       <div class="clipai-hero-card">
         <div class="clipai-mini-label">Your creator workflow</div>
-        <div class="clipai-mini-title">From full-length to share-ready</div>
-        <div class="clipai-mini-copy">Upload a video or load a direct authorized file link, choose how many clips to try, then preview and download each result.</div>
+        <div class="clipai-mini-title">A smarter path from long to short</div>
+        <div class="clipai-mini-copy">Bring a video up to 30 minutes, choose 2–5 moments, customize captions, and export vertical clips for social platforms.</div>
         <div class="clipai-statrow">
           <span class="clipai-stat">01 · Upload</span>
           <span class="clipai-stat">02 · Find moments</span>
           <span class="clipai-stat">03 · Export</span>
         </div>
-        <div class="clipai-mini-copy" style="margin-top:14px">Direct HTTPS video-file links are supported in this beta. YouTube watch links remain preview-only.</div>
+        <div class="clipai-mini-copy" style="margin-top:14px">Direct HTTPS video-file links are supported in this beta. YouTube watch links remain preview-only. Videos can be up to 30 minutes (150 MB).</div>
       </div>
     </section>
     <div id="create" class="clipai-section-kicker">Create</div>
@@ -853,11 +890,11 @@ with settings_c:
         help="More clips can take longer. ClipAI may return fewer if there are not enough distinct moments.",
     )
 
-st.caption("Fast beta export: 720 × 1280 at 24 FPS. We are optimizing quality and processing time before increasing limits.")
+st.caption("30-minute beta input · 720 × 1280 vertical exports at 24 FPS · 2–5 clips per job. Longer videos need chunked processing, which we will add after this stable beta test.")
 
 st.markdown(
     """
-    <div class="clipai-limit"><b>Beta limits:</b> 50 MB upload · 5-minute video · 2 jobs per browser session per day · 5 jobs shared across the app per day.</div>
+    <div class="clipai-limit"><b>Beta limits:</b> up to 150 MB upload · up to 30-minute video · 2 jobs per account per day · 5 jobs shared across ClipAI per day. Audio is compressed before AI analysis to stay within the current transcription file limit.</div>
     """,
     unsafe_allow_html=True,
 )
@@ -878,7 +915,7 @@ uploaded_file_widget = st.file_uploader(
     "📁 Upload your video",
     type=["mp4", "mov", "mkv", "avi", "webm"],
     max_upload_size=MAX_UPLOAD_MB,
-    help=f"Maximum file size: {MAX_UPLOAD_MB} MB. Maximum video length: 5 minutes.",
+    help=f"Maximum file size: {MAX_UPLOAD_MB} MB. Maximum video length: 30 minutes.",
 )
 
 uploaded_file = uploaded_file_widget
@@ -890,7 +927,9 @@ if uploaded_file is not None:
     file_size_mb = uploaded_file.size / (1024 * 1024)
     source_label = "Direct video link loaded" if isinstance(uploaded_file, MemoryVideo) else "Video uploaded"
     st.success(f"{source_label}: {uploaded_file.name} ({file_size_mb:.1f} MB)")
-    st.video(uploaded_file.getvalue(), width=320)
+    # Keep large source videos out of the initial page render; preview only on demand.
+    with st.expander("Preview source video", expanded=False):
+        st.video(uploaded_file.getvalue(), width=300)
 
     if file_size_mb > MAX_UPLOAD_MB:
         st.error(f"Please upload a file smaller than {MAX_UPLOAD_MB} MB.")
@@ -935,7 +974,7 @@ if uploaded_file is not None:
                             if duration <= 0:
                                 raise ValueError("The video duration could not be read.")
                             if duration > MAX_VIDEO_SECONDS:
-                                raise ValueError("For the free beta, please use a video of 5 minutes or less.")
+                                raise ValueError("For this beta, please use a video of 30 minutes or less.")
 
                         with st.spinner("Extracting audio..."):
                             run_command(
@@ -944,7 +983,7 @@ if uploaded_file is not None:
                                     "-map", "0:a:0", "-vn", "-ac", "1",
                                     "-ar", "16000", "-b:a", "48k", str(audio_path),
                                 ],
-                                timeout=180,
+                                timeout=600,
                             )
 
                         if not audio_path.exists():
@@ -960,6 +999,7 @@ if uploaded_file is not None:
                                     response_format="verbose_json",
                                     timestamp_granularities=["word", "segment"],
                                     temperature=0.0,
+                                    timeout=600.0,
                                 )
 
                         transcript = get_value(transcription, "text", "")
@@ -969,7 +1009,7 @@ if uploaded_file is not None:
                             raise ValueError("No clear speech was detected. Try a video with audible speech.")
 
                         transcript_lines = []
-                        for segment in segments[:500]:
+                        for segment in segments:
                             start = get_value(segment, "start")
                             end = get_value(segment, "end")
                             words = get_value(segment, "text", "")
@@ -987,7 +1027,33 @@ if uploaded_file is not None:
                         if not transcript_lines:
                             raise ValueError("AI did not return usable speech timestamps.")
 
-                        timestamped_transcript = "\n".join(transcript_lines)
+                        full_timestamped_transcript = "\n".join(transcript_lines)
+                        timestamped_transcript = full_timestamped_transcript
+                        transcript_sampled = False
+                        if len(full_timestamped_transcript) > MAX_TRANSCRIPT_CHARS_FOR_AI:
+                            # Evenly sample timestamped speech lines across the entire video,
+                            # not just the opening minutes, to keep the model prompt manageable.
+                            target_count = max(
+                                1,
+                                int(len(transcript_lines) * MAX_TRANSCRIPT_CHARS_FOR_AI / len(full_timestamped_transcript)),
+                            )
+                            while target_count > 1:
+                                indexes = sorted({
+                                    round(i * (len(transcript_lines) - 1) / (target_count - 1))
+                                    for i in range(target_count)
+                                })
+                                candidate = "\n".join(transcript_lines[index] for index in indexes)
+                                if len(candidate) <= MAX_TRANSCRIPT_CHARS_FOR_AI:
+                                    timestamped_transcript = candidate
+                                    break
+                                target_count -= 1
+                            transcript_sampled = True
+
+                        if transcript_sampled:
+                            st.info(
+                                "This is a long video, so ClipAI sampled speech moments from across the full 30 minutes "
+                                "to keep AI analysis within the free-tier request budget."
+                            )
 
                         with st.spinner("AI is selecting the best moments..."):
                             response = client.chat.completions.create(
@@ -1009,7 +1075,7 @@ if uploaded_file is not None:
                                         "role": "user",
                                         "content": (
                                             f"Video duration: {duration:.2f} seconds.\n"
-                                            f"Select up to {requested_clip_count} strongest, distinct moments from this transcript. "
+                                            f"Select up to {requested_clip_count} strongest, distinct moments from this timestamped transcript sample spanning the entire video. "
                                             "If there are not enough good moments, return fewer rather than weak clips. "
                                             "Respond as JSON matching this exact shape: "
                                             '{"clips":[{"start":10.0,"end":35.0,"title":"Short title","reason":"Why it is engaging"}]}.\n'
@@ -1124,7 +1190,7 @@ if uploaded_file is not None:
                                     str(output_path),
                                 ]
                                 try:
-                                    run_command(encode_args, timeout=240)
+                                    run_command(encode_args, timeout=360)
                                 except RuntimeError:
                                     # If subtitle rendering is unavailable, retry without
                                     # burned captions; the separate SRT remains downloadable.
@@ -1136,7 +1202,7 @@ if uploaded_file is not None:
                                         )
                                         clean_filter = video_filter.split(",subtitles=", 1)[0]
                                         encode_args[encode_args.index(video_filter)] = clean_filter
-                                        run_command(encode_args, timeout=240)
+                                        run_command(encode_args, timeout=360)
                                     else:
                                         raise
 
