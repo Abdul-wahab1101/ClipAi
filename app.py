@@ -1,4 +1,5 @@
 import hashlib
+import html
 import ipaddress
 import json
 import re
@@ -27,9 +28,12 @@ MAX_JOBS_PER_USER_PER_DAY = 2
 MAX_JOBS_TOTAL_PER_APP_PER_DAY = 5  # Keep this beta cap until public launch tests pass.
 
 st.set_page_config(
-    page_title="ClipAI - AI Video Clipper",
-    page_icon="🎬",
+    page_title="ClipAI | AI Video Clipper",
+    page_icon="🎬",  # Browser-tab favicon for the Streamlit beta.
     layout="wide",
+    menu_items={
+        "About": "ClipAI helps creators turn authorized long videos into short vertical clips. Free beta; limits may change.",
+    },
 )
 
 
@@ -190,14 +194,29 @@ The operator may change, pause, or discontinue this beta to protect the service,
         st.caption("This is a beta terms draft, not legal advice. Have it reviewed for the laws and regions where ClipAI will be offered before public launch.")
 
 
-# Public policy pages are available even before sign-in.
+# Lightweight app routes: keep policy pages accessible before sign-in and
+# provide an in-app not-found page for unsupported ?page= values.
+PAGE_OPTIONS = ["Create clips", "Privacy Policy", "Terms of Service"]
+requested_page = st.query_params.get("page", "Create clips")
+
+if requested_page not in PAGE_OPTIONS:
+    st.title("404 — Page not found")
+    st.write("This ClipAI page does not exist or may have moved.")
+    st.link_button("Go to ClipAI home", "?page=Create%20clips")
+    st.stop()
+
 page_selection = st.sidebar.radio(
     "ClipAI menu",
-    ["Create clips", "Privacy Policy", "Terms of Service"],
-    index=0,
+    PAGE_OPTIONS,
+    index=PAGE_OPTIONS.index(requested_page),
 )
 if page_selection != "Create clips":
     render_policy_page(page_selection)
+    st.markdown(
+        "---\n[🎬 Back to ClipAI](?page=Create%20clips) · "
+        "[Privacy Policy](?page=Privacy%20Policy) · "
+        "[Terms of Service](?page=Terms%20of%20Service)"
+    )
     st.stop()
 
 # Require both Google OIDC and the durable usage database before processing is enabled.
@@ -711,7 +730,7 @@ st.markdown(
 st.markdown(
     """
     <div id="top" class="clipai-nav">
-      <a class="clipai-brand" href="#top">🎬 Clip<span>AI</span></a>
+      <a class="clipai-brand" href="?page=Create%20clips#top">🎬 Clip<span>AI</span></a>
       <div class="clipai-navlinks">
         <a href="#create">Create clips</a>
         <a href="#how-it-works">How it works</a>
@@ -1183,8 +1202,13 @@ if uploaded_file is not None:
                     else:
                         st.error(f"ClipAI could not finish this job: {error_text[:700]}")
 
+current_year = datetime.now(timezone.utc).year
+contact_link = (
+    f'<a href="mailto:{html.escape(CONTACT_EMAIL, quote=True)}">Email ClipAI</a>'
+    if CONTACT_EMAIL else ""
+)
 st.markdown(
-    """
+    f"""
     <div id="how-it-works" class="clipai-section-kicker">Simple workflow</div>
     <div class="clipai-section-title">How ClipAI works</div>
     <div class="clipai-feature-grid">
@@ -1199,8 +1223,12 @@ st.markdown(
       <div class="clipai-feature"><div class="clipai-feature-icon">⚡</div><div class="clipai-feature-title">Lightweight beta exports</div><div class="clipai-feature-copy">720 × 1280 exports help us test a faster workflow on limited free hosting.</div></div>
     </div>
     <div class="clipai-footer">
-      <span>© 2026 ClipAI · Free beta. Features and limits may change during testing.</span>
-      <span><a href="#top">Back to top ↑</a> · Privacy Policy and Terms are in the sidebar · Upload authorized content only.</span>
+      <span>© {current_year} ClipAI · Free beta. Features and limits may change during testing.</span>
+      <span>
+        <a href="?page=Privacy%20Policy">Privacy Policy</a> ·
+        <a href="?page=Terms%20of%20Service">Terms of Service</a> ·
+        {contact_link} · <a href="#top">Back to top ↑</a>
+      </span>
     </div>
     """,
     unsafe_allow_html=True,
